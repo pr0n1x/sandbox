@@ -27,7 +27,7 @@ that you don't fully trust.
 ## Usage
 
 ```sh
-sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home] [-n|--net] [-6|--ipv6] [-o|--outbound IFACE] /usr/bin/someapp [args...]
+sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home] [-n|--net[IFACE]] [-6|--ipv6] /usr/bin/someapp [args...]
 ```
 
 - `-i`, `--interactive` — drop `--new-session` so an interactive shell inside
@@ -43,7 +43,7 @@ sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home]
 - `-a`, `--app-home` — use a per-app box, `~/sandboxes/<full-path-of-binary>`
   (e.g. `/usr/bin/foo` → `~/sandboxes/usr/bin/foo`), instead of the default
   shared box `~/sandboxes/<real-home-path>` that all apps see together.
-- `-n`, `--net` — outbound internet access, still in a separate network
+- `-n[IFACE]`, `--net[=IFACE]` — outbound internet access, still in a separate network
   namespace: bwrap creates the namespaces as usual, then `pasta` (rootless
   user-mode NAT, as used by Podman) *attaches* to the sandbox netns and relays
   TCP/UDP through unprivileged host sockets; the app is held on bwrap's
@@ -60,14 +60,14 @@ sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home]
 - `-6`, `--ipv6` — with `-n`, also enable IPv6 in the sandbox network; the
   default is IPv4-only (pasta `-4`). On hosts with IPv6 disabled, pasta then
   prints `No routable interface for IPv6` and falls back to IPv4.
-- `-o IFACE`, `--outbound IFACE` — implies `-n`; mirror IFACE inside the
-  sandbox (pasta `-i`) and pin pasta's host sockets to it
-  (`--outbound-if4`, via `SO_BINDTODEVICE`). Bound sockets bypass policy
-  routing, so this sends sandbox traffic straight out of IFACE even when a
-  WireGuard tunnel with `AllowedIPs 0.0.0.0/0` owns the host's default route
-  — e.g. `-o enp39s0` gives the sandbox the physical uplink while the host
-  stays on the VPN. Caveat: DNS is forwarded to the host resolver
-  (systemd-resolved), whose own upstream queries still follow host routing.
+  The optional IFACE (must be attached: `-nenp39s0` or `--net=enp39s0`)
+  mirrors that interface inside the sandbox (pasta `-i`) and pins pasta's
+  host sockets to it (`--outbound-if4`, via `SO_BINDTODEVICE`). Bound sockets
+  bypass policy routing, so sandbox traffic goes straight out of IFACE even
+  when a WireGuard tunnel with `AllowedIPs 0.0.0.0/0` owns the host's default
+  route — the sandbox gets the physical uplink while the host stays on the
+  VPN. Caveat: DNS is forwarded to the host resolver (systemd-resolved),
+  whose own upstream queries still follow host routing.
 
 The app name is resolved with `which`, so `sandbox.sh ping` and
 `sandbox.sh /usr/bin/ping` run the same binary and (with `-a`) use the same

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -eu
 
-usage() { echo "usage: sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home] [-n|--net] [-6|--ipv6] [-o|--outbound IFACE] /usr/bin/someapp [args...]" >&2; exit 2; }
+usage() { echo "usage: sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home] [-n|--net[IFACE]] [-6|--ipv6] /usr/bin/someapp [args...]" >&2; exit 2; }
 
 # '+' stops parsing at the first non-option, so the app's own flags pass through untouched
-OPTS=$(getopt -o +iw:h:an6o: -l interactive,workdir:,home:,app-home,net,ipv6,outbound: -n sandbox.sh -- "$@") || usage
+OPTS=$(getopt -o +iw:h:an::6 -l interactive,workdir:,home:,app-home,net::,ipv6 -n sandbox.sh -- "$@") || usage
 eval set -- "$OPTS"
 
 NEW_SESSION="--new-session"   # -i: keep the terminal session (job control), like docker run -i
@@ -16,7 +16,7 @@ NET_ARGS=()                   # -n: root mapping inside the sandbox userns
 RESOLV_ARGS=()                # -n: DNS goes through pasta's forwarder
 PASTA_IP=(-4)                 # -6: also enable IPv6 in the sandbox network; default IPv4-only
 IPV6=""
-OUT_IF=""                     # -o IFACE: mirror IFACE inside and pin pasta's sockets to it
+OUT_IF=""                     # -nIFACE: mirror IFACE inside and pin pasta's sockets to it
 DNS_FWD=169.254.1.1
 while true; do
   case "$1" in
@@ -27,8 +27,8 @@ while true; do
     -h|--home) BOX="$(realpath -m "$2")"; shift 2 ;;
     -a|--app-home) APP_HOME=1; shift ;;
     -6|--ipv6) PASTA_IP=(); IPV6=1; shift ;;
-    -n|--net) NET=1; shift ;;
-    -o|--outbound) OUT_IF="$2"; NET=1; shift 2 ;;   # implies -n
+    # the optional IFACE must be attached: -nIFACE / --net=IFACE
+    -n|--net) NET=1; OUT_IF="$2"; shift 2 ;;
     --) shift; break ;;
   esac
 done
