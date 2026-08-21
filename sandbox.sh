@@ -135,6 +135,15 @@ BWRAP_ARGS=(
   --tmpfs /tmp
   "${X11_ARGS[@]}"
   --bind "$BOX" "$HOME"
+  # system appearance (dark/light theme): host toolkit configs, read-only
+  --ro-bind-try "$HOME/.config/kdeglobals" "$HOME/.config/kdeglobals"
+  --ro-bind-try "$HOME/.config/gtk-3.0/settings.ini" "$HOME/.config/gtk-3.0/settings.ini"
+  --ro-bind-try "$HOME/.config/gtk-4.0/settings.ini" "$HOME/.config/gtk-4.0/settings.ini"
+  --ro-bind-try "$HOME/.gtkrc-2.0" "$HOME/.gtkrc-2.0"
+  --ro-bind-try "$HOME/.config/qt5ct" "$HOME/.config/qt5ct"
+  --ro-bind-try "$HOME/.config/qt6ct" "$HOME/.config/qt6ct"
+  --ro-bind-try "$HOME/.themes" "$HOME/.themes"
+  --ro-bind-try "$HOME/.icons" "$HOME/.icons"
   "${WORKDIR_ARGS[@]}"
   --perms 0700 --dir "$XDG_RUNTIME_DIR"
   --ro-bind "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"

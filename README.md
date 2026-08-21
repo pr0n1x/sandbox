@@ -22,6 +22,11 @@ that you don't fully trust.
   `/tmp` is a fresh tmpfs.
 - **Wayland GUI, GPU and sound**: the Wayland socket, `/dev/dri` and
   PipeWire/PulseAudio sockets are passed through. D-Bus is deliberately not.
+- **System appearance**: the host's theme configs (`~/.config/kdeglobals`,
+  GTK `settings.ini`, `qt5ct`/`qt6ct`, `~/.themes`, `~/.icons`) are bound
+  read-only into the box home, so Qt/GTK apps follow the host dark/light
+  theme. Apps that only listen to the desktop portal (libadwaita, Electron)
+  won't pick it up — that would need the D-Bus session bus.
 - **No terminal control** by default (`--new-session`).
 
 ## Usage
