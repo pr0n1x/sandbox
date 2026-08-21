@@ -13,9 +13,10 @@ that you don't fully trust.
 - **Own user / PID / IPC / UTS / network namespaces** (`--unshare-all`) —
   the network namespace contains only loopback, so the app has no network
   access and can't see host interfaces.
-- **Private home**: the app's `$HOME` is a bind mount of
-  `~/sandboxes/<full-path-of-binary>` (e.g. `/usr/bin/foo` →
-  `~/sandboxes/usr/bin/foo`). The real home directory is invisible.
+- **Private home**: the app's `$HOME` is a bind mount of a sandbox dir —
+  by default the shared box `~/sandboxes/<real-home-path>` (e.g.
+  `~/sandboxes/home/user`), or a per-app / explicit box via `-a` / `-h`.
+  The real home directory is invisible.
 - **Read-only system**: `/usr`, `/etc`, `/opt`, `/sys` are bound read-only;
   `/tmp` is a fresh tmpfs.
 - **Wayland GUI, GPU and sound**: the Wayland socket, `/dev/dri` and
@@ -25,7 +26,7 @@ that you don't fully trust.
 ## Usage
 
 ```sh
-sandbox.sh [-i|--interactive] [-w|--workdir DIR] /usr/bin/someapp [args...]
+sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home] /usr/bin/someapp [args...]
 ```
 
 - `-i`, `--interactive` — drop `--new-session` so an interactive shell inside
@@ -36,9 +37,15 @@ sandbox.sh [-i|--interactive] [-w|--workdir DIR] /usr/bin/someapp [args...]
   sandbox and start the app there (like `docker run -w`). This is the way to
   hand the app a specific project/data directory while the rest of `$HOME`
   stays hidden.
+- `-h DIR`, `--home DIR` — use DIR as the sandbox home (created if missing).
+  Overrides `-a`.
+- `-a`, `--app-home` — use a per-app box, `~/sandboxes/<full-path-of-binary>`
+  (e.g. `/usr/bin/foo` → `~/sandboxes/usr/bin/foo`), instead of the default
+  shared box `~/sandboxes/<real-home-path>` that all apps see together.
 
-The app name is resolved via `PATH`, so `sandbox.sh ping` and
-`sandbox.sh /usr/bin/ping` use the same sandbox directory.
+The app name is resolved with `which`, so `sandbox.sh ping` and
+`sandbox.sh /usr/bin/ping` run the same binary and (with `-a`) use the same
+sandbox directory.
 
 ## Requirements
 
