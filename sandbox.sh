@@ -28,7 +28,7 @@ while true; do
     # app runs as (fake) root inside, like rootless podman/docker containers
     -n|--net)
       NET=1
-      NET_ARGS=(--uid 0 --gid 0)
+      NET_ARGS=(--uid 0 --gid 0 --cap-add CAP_NET_RAW)   # NET_RAW so ping can open its socket
       # bind at the symlink target (e.g. systemd-resolved's stub under /run),
       # creating its directory; must come after the /etc bind or it gets buried
       RESOLV="$(realpath -m /etc/resolv.conf)"

@@ -89,6 +89,14 @@ sandbox directory.
   `--ro-bind /tmp/.X11-unix/X0 /tmp/.X11-unix/X0 --setenv DISPLAY :0`.
 - Electron/Chromium apps may need their own `--no-sandbox` flag; the outer
   sandbox is still provided by bwrap.
-- `ping` never works inside (even with `-n`): `no_new_privs` strips its file
-  capability, and a fresh netns disables unprivileged ICMP sockets. Test with
+- `ping` under `-n` sends packets (the sandbox grants `CAP_NET_RAW`), but
+  replies only come back if the host allows unprivileged ping sockets, which
+  pasta uses to relay ICMP:
+
+  ```sh
+  echo 'net.ipv4.ping_group_range = 0 2147483647' | sudo tee /etc/sysctl.d/99-ping.conf
+  sudo sysctl --system
+  ```
+
+  Without that (or without `-n` at all) `ping` fails — test connectivity with
   `curl` instead.
