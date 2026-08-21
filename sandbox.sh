@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -eu
 
-usage() { echo "usage: sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home] [-n|--net] /usr/bin/someapp [args...]" >&2; exit 2; }
+usage() { echo "usage: sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home] [-n|--net] [-6|--ipv6] /usr/bin/someapp [args...]" >&2; exit 2; }
 
 # '+' stops parsing at the first non-option, so the app's own flags pass through untouched
-OPTS=$(getopt -o +iw:h:an -l interactive,workdir:,home:,app-home,net -n sandbox.sh -- "$@") || usage
+OPTS=$(getopt -o +iw:h:an6 -l interactive,workdir:,home:,app-home,net,ipv6 -n sandbox.sh -- "$@") || usage
 eval set -- "$OPTS"
 
 NEW_SESSION="--new-session"   # -i: keep the terminal session (job control), like docker run -i
@@ -14,6 +14,7 @@ APP_HOME=""                   # -a: use a per-app box instead, ~/sandboxes/<bina
 NET=""                        # -n: pasta attaches to the sandbox netns for outbound networking
 NET_ARGS=()                   # -n: root mapping inside the sandbox userns
 RESOLV_ARGS=()                # -n: DNS goes through pasta's forwarder
+PASTA_IP=(-4)                 # -6: also enable IPv6 in the sandbox network; default IPv4-only
 DNS_FWD=169.254.1.1
 while true; do
   case "$1" in
@@ -23,6 +24,7 @@ while true; do
       WORKDIR_ARGS=(--bind "$WD" "$WD" --chdir "$WD"); shift 2 ;;
     -h|--home) BOX="$(realpath -m "$2")"; shift 2 ;;
     -a|--app-home) APP_HOME=1; shift ;;
+    -6|--ipv6) PASTA_IP=(); shift ;;
     # --uid 0: pasta can only gain caps in the sandbox userns if its uid maps to
     # root there (its self-hardening blocks the join otherwise), so with -n the
     # app runs as (fake) root inside, like rootless podman/docker containers
@@ -110,7 +112,7 @@ CHILD_PID="$(sed -n 's/.*"child-pid": *\([0-9][0-9]*\).*/\1/p' <<<"$STATUS_LINE"
 [ -n "$CHILD_PID" ] ||
   { echo "sandbox.sh: bwrap did not report a child pid" >&2; kill -9 "$BWRAP_PID" 2>/dev/null; exit 1; }
 
-pasta --config-net --quiet --dns-forward "$DNS_FWD" \
+pasta --config-net --quiet "${PASTA_IP[@]}" --dns-forward "$DNS_FWD" \
       --userns "/proc/$CHILD_PID/ns/user" --netns "/proc/$CHILD_PID/ns/net" ||
   { echo "sandbox.sh: pasta failed (is the passt package installed?)" >&2; kill -9 "$CHILD_PID" "$BWRAP_PID" 2>/dev/null; exit 1; }
 

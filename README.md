@@ -27,7 +27,7 @@ that you don't fully trust.
 ## Usage
 
 ```sh
-sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home] [-n|--net] /usr/bin/someapp [args...]
+sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home] [-n|--net] [-6|--ipv6] /usr/bin/someapp [args...]
 ```
 
 - `-i`, `--interactive` — drop `--new-session` so an interactive shell inside
@@ -57,6 +57,9 @@ sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home]
   root there. Requires the `passt` package. TCP/UDP (curl, browsers) work out
   of the box; `ping` replies additionally need unprivileged ping sockets
   enabled on the host — see the ICMP note in Notes below.
+- `-6`, `--ipv6` — with `-n`, also enable IPv6 in the sandbox network; the
+  default is IPv4-only (pasta `-4`). On hosts with IPv6 disabled, pasta then
+  prints `No routable interface for IPv6` and falls back to IPv4.
 
 The app name is resolved with `which`, so `sandbox.sh ping` and
 `sandbox.sh /usr/bin/ping` run the same binary and (with `-a`) use the same
