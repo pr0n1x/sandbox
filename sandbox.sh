@@ -23,13 +23,16 @@ options:
                       (-nenp39s0 / --net=enp39s0) traffic is pinned to that
                       interface, bypassing e.g. a WireGuard default route
   -6, --ipv6          with -n: also enable IPv6 (default is IPv4-only)
+  -x, --x11           pass the X11 socket and auth cookie through, for
+                      X11-only apps (weakens isolation: X clients can snoop
+                      each other)
       --help          show this help
 EOF
   exit 0
 }
 
 # '+' stops parsing at the first non-option, so the app's own flags pass through untouched
-OPTS=$(getopt -o +iw:h:an::6 -l help,interactive,workdir:,home:,app-home,net::,ipv6 -n sandbox.sh -- "$@") || usage
+OPTS=$(getopt -o +iw:h:an::6x -l help,interactive,workdir:,home:,app-home,net::,ipv6,x11 -n sandbox.sh -- "$@") || usage
 eval set -- "$OPTS"
 
 NEW_SESSION="--new-session"   # -i: keep the terminal session (job control), like docker run -i
@@ -42,6 +45,7 @@ RESOLV_ARGS=()                # -n: DNS goes through pasta's forwarder
 PASTA_IP=(-4)                 # -6: also enable IPv6 in the sandbox network; default IPv4-only
 IPV6=""
 OUT_IF=""                     # -nIFACE: mirror IFACE inside and pin pasta's sockets to it
+X11=""                        # -x: pass the X11 socket through (weakens isolation)
 DNS_FWD=169.254.1.1
 while true; do
   case "$1" in
@@ -53,6 +57,7 @@ while true; do
     -h|--home) BOX="$(realpath -m "$2")"; shift 2 ;;
     -a|--app-home) APP_HOME=1; shift ;;
     -6|--ipv6) PASTA_IP=(); IPV6=1; shift ;;
+    -x|--x11) X11=1; shift ;;
     # the optional IFACE must be attached: -nIFACE / --net=IFACE
     -n|--net) NET=1; OUT_IF="$2"; shift 2 ;;
     --) shift; break ;;
@@ -68,6 +73,15 @@ if [ -n "$NET" ]; then
   # creating its directory; must come after the /etc bind or it gets buried
   RESOLV="$(realpath -m /etc/resolv.conf)"
   RESOLV_ARGS=(--perms 0755 --dir "${RESOLV%/*}" --ro-bind-data 9 "$RESOLV")
+fi
+X11_ARGS=()
+if [ -n "$X11" ]; then
+  DISP="${DISPLAY:-:0}"; DISP="${DISP#*:}"; DISP="${DISP%%.*}"   # ":1" or "host:1.0" -> "1"
+  XSOCK="/tmp/.X11-unix/X$DISP"
+  [ -S "$XSOCK" ] || { echo "sandbox.sh: no X11 socket at $XSOCK" >&2; exit 1; }
+  X11_ARGS=(--ro-bind "$XSOCK" "$XSOCK" --setenv DISPLAY ":$DISP")
+  # the X server wants the auth cookie; keep its env path valid inside
+  [ -z "${XAUTHORITY:-}" ] || X11_ARGS+=(--ro-bind "$XAUTHORITY" "$XAUTHORITY" --setenv XAUTHORITY "$XAUTHORITY")
 fi
 OUT_ARGS=()
 if [ -n "$OUT_IF" ]; then
@@ -119,6 +133,7 @@ BWRAP_ARGS=(
   --dev-bind /dev/dri /dev/dri
   --ro-bind /sys /sys
   --tmpfs /tmp
+  "${X11_ARGS[@]}"
   --bind "$BOX" "$HOME"
   "${WORKDIR_ARGS[@]}"
   --perms 0700 --dir "$XDG_RUNTIME_DIR"

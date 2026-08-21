@@ -27,7 +27,7 @@ that you don't fully trust.
 ## Usage
 
 ```sh
-sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home] [-n|--net[IFACE]] [-6|--ipv6] /usr/bin/someapp [args...]
+sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] /usr/bin/someapp [args...]
 ```
 
 - `-i`, `--interactive` — drop `--new-session` so an interactive shell inside
@@ -60,6 +60,10 @@ sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home]
 - `-6`, `--ipv6` — with `-n`, also enable IPv6 in the sandbox network; the
   default is IPv4-only (pasta `-4`). On hosts with IPv6 disabled, pasta then
   prints `No routable interface for IPv6` and falls back to IPv4.
+- `-x`, `--x11` — pass the X11 socket for `$DISPLAY` (and the `$XAUTHORITY`
+  cookie) through, for X11-only apps such as Qt builds without the Wayland
+  plugin. Weakens isolation: X11 clients can snoop each other's windows and
+  input.
   The optional IFACE (must be attached: `-nenp39s0` or `--net=enp39s0`)
   mirrors that interface inside the sandbox (pasta `-i`) and pins pasta's
   host sockets to it (`--outbound-if4`, via `SO_BINDTODEVICE`). Bound sockets
@@ -97,9 +101,8 @@ sandbox directory.
 
 ## Notes
 
-- X11-only apps need the X socket passed through (weakens isolation —
-  X11 clients can snoop each other): add
-  `--ro-bind /tmp/.X11-unix/X0 /tmp/.X11-unix/X0 --setenv DISPLAY :0`.
+- X11-only apps (symptom: `could not connect to display`, `Available
+  platform plugins are: xcb`) need `-x`.
 - Electron/Chromium apps may need their own `--no-sandbox` flag; the outer
   sandbox is still provided by bwrap.
 - The app binary's file capabilities (e.g. ping's `cap_net_raw=ep`), which
