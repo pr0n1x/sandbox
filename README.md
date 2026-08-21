@@ -54,7 +54,9 @@ sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home]
   With `-n` the app runs as (fake) root inside its user namespace, like
   rootless podman/docker containers — pasta's self-hardening only lets it
   gain the needed capabilities in the sandbox userns when its uid maps to
-  root there. Requires the `passt` package.
+  root there. Requires the `passt` package. TCP/UDP (curl, browsers) work out
+  of the box; `ping` replies additionally need unprivileged ping sockets
+  enabled on the host — see the ICMP note in Notes below.
 
 The app name is resolved with `which`, so `sandbox.sh ping` and
 `sandbox.sh /usr/bin/ping` run the same binary and (with `-a`) use the same
@@ -99,7 +101,7 @@ sandbox directory.
   pasta uses to relay ICMP:
 
   ```sh
-  echo 'net.ipv4.ping_group_range = 0 2147483647' | sudo tee /etc/sysctl.d/99-ping.conf
+  echo 'net.ipv4.ping_group_range = 0 2147483647' | sudo tee /etc/sysctl.d/99-sandboxed-ping.conf
   sudo sysctl --system
   ```
 
