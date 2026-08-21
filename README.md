@@ -25,13 +25,17 @@ that you don't fully trust.
 ## Usage
 
 ```sh
-sandbox.sh [-i|--interactive] /usr/bin/someapp [args...]
+sandbox.sh [-i|--interactive] [-w|--workdir DIR] /usr/bin/someapp [args...]
 ```
 
 - `-i`, `--interactive` — drop `--new-session` so an interactive shell inside
   the sandbox gets job control (like `docker run -i`). Only safe when the
   kernel has `dev.tty.legacy_tiocsti = 0` (default on modern kernels), which
   blocks the TIOCSTI terminal-injection attack `--new-session` guards against.
+- `-w DIR`, `--workdir DIR` — bind DIR read-write at its real path inside the
+  sandbox and start the app there (like `docker run -w`). This is the way to
+  hand the app a specific project/data directory while the rest of `$HOME`
+  stays hidden.
 
 The app name is resolved via `PATH`, so `sandbox.sh ping` and
 `sandbox.sh /usr/bin/ping` use the same sandbox directory.
