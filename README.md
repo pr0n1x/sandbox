@@ -11,8 +11,9 @@ that you don't fully trust.
 `sandbox.sh` launches the app with:
 
 - **Own user / PID / IPC / UTS / network namespaces** (`--unshare-all`) —
-  the network namespace contains only loopback, so the app has no network
-  access and can't see host interfaces.
+  the network namespace contains only loopback, so by default the app has no
+  network access and can't see host interfaces. `-n` grants outbound internet
+  through [pasta](https://passt.top/) while keeping the separate netns.
 - **Private home**: the app's `$HOME` is a bind mount of a sandbox dir —
   by default the shared box `~/sandboxes/<real-home-path>` (e.g.
   `~/sandboxes/home/user`), or a per-app / explicit box via `-a` / `-h`.
@@ -26,7 +27,7 @@ that you don't fully trust.
 ## Usage
 
 ```sh
-sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home] /usr/bin/someapp [args...]
+sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home] [-n|--net] /usr/bin/someapp [args...]
 ```
 
 - `-i`, `--interactive` — drop `--new-session` so an interactive shell inside
@@ -42,6 +43,18 @@ sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home]
 - `-a`, `--app-home` — use a per-app box, `~/sandboxes/<full-path-of-binary>`
   (e.g. `/usr/bin/foo` → `~/sandboxes/usr/bin/foo`), instead of the default
   shared box `~/sandboxes/<real-home-path>` that all apps see together.
+- `-n`, `--net` — outbound internet access, still in a separate network
+  namespace: bwrap creates the namespaces as usual, then `pasta` (rootless
+  user-mode NAT, as used by Podman) *attaches* to the sandbox netns and relays
+  TCP/UDP through unprivileged host sockets; the app is held on bwrap's
+  `--block-fd` until the network is configured. Because pasta only joins an
+  existing namespace instead of creating one, it needs no AppArmor userns
+  profile of its own. DNS goes through pasta's `--dns-forward` to the host's
+  real resolver, so systemd-resolved and VPN/split-DNS setups keep working.
+  With `-n` the app runs as (fake) root inside its user namespace, like
+  rootless podman/docker containers — pasta's self-hardening only lets it
+  gain the needed capabilities in the sandbox userns when its uid maps to
+  root there. Requires the `passt` package.
 
 The app name is resolved with `which`, so `sandbox.sh ping` and
 `sandbox.sh /usr/bin/ping` run the same binary and (with `-a`) use the same
@@ -50,6 +63,9 @@ sandbox directory.
 ## Requirements
 
 - `bubblewrap` (`apt install bubblewrap`)
+- `passt` (`apt install passt`) — only for `-n`/`--net`. No AppArmor setup
+  needed: pasta only attaches to the netns bwrap already created, and joining
+  an existing namespace isn't gated by the Ubuntu userns restriction.
 - On Ubuntu 24.04+ unprivileged user namespaces are restricted by AppArmor;
   bwrap needs a profile allowing them:
 
@@ -73,13 +89,6 @@ sandbox directory.
   `--ro-bind /tmp/.X11-unix/X0 /tmp/.X11-unix/X0 --setenv DISPLAY :0`.
 - Electron/Chromium apps may need their own `--no-sandbox` flag; the outer
   sandbox is still provided by bwrap.
-- `ping` never works inside: `no_new_privs` strips its file capability, and a
-  fresh netns disables unprivileged ICMP sockets. Test with `curl` instead.
-
-## TODO
-
-- **Networking**: add a `-n`/`--net` flag that gives the sandbox internet
-  access while keeping a separate network namespace — run under
-  `pasta --config-net` (from the `passt` package, rootless NAT as used by
-  Podman) and switch bwrap to `--unshare-all --share-net` so it stays in the
-  netns pasta created.
+- `ping` never works inside (even with `-n`): `no_new_privs` strips its file
+  capability, and a fresh netns disables unprivileged ICMP sockets. Test with
+  `curl` instead.
