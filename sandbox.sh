@@ -3,8 +3,33 @@ set -eu
 
 usage() { echo "usage: sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home] [-n|--net[IFACE]] [-6|--ipv6] /usr/bin/someapp [args...]" >&2; exit 2; }
 
+help() {
+  cat <<EOF
+usage: sandbox.sh [options] /usr/bin/someapp [args...]
+
+Run an app inside strict bubblewrap isolation: own namespaces, no network,
+read-only system, a private home under ~/sandboxes, Wayland/GPU/sound passed
+through. See README.md for details.
+
+options:
+  -i, --interactive   keep the terminal session for job control, like
+                      'docker run -i' (drops bwrap's --new-session)
+  -w, --workdir DIR   rw-bind DIR at its real path and start the app there
+  -h, --home DIR      use DIR as the sandbox home
+                      (default: the shared box ~/sandboxes\$HOME)
+  -a, --app-home      per-app sandbox home instead: ~/sandboxes/<binary path>
+  -n, --net[IFACE]    outbound networking via pasta (rootless NAT); the app
+                      runs as fake root inside. With an attached IFACE
+                      (-nenp39s0 / --net=enp39s0) traffic is pinned to that
+                      interface, bypassing e.g. a WireGuard default route
+  -6, --ipv6          with -n: also enable IPv6 (default is IPv4-only)
+      --help          show this help
+EOF
+  exit 0
+}
+
 # '+' stops parsing at the first non-option, so the app's own flags pass through untouched
-OPTS=$(getopt -o +iw:h:an::6 -l interactive,workdir:,home:,app-home,net::,ipv6 -n sandbox.sh -- "$@") || usage
+OPTS=$(getopt -o +iw:h:an::6 -l help,interactive,workdir:,home:,app-home,net::,ipv6 -n sandbox.sh -- "$@") || usage
 eval set -- "$OPTS"
 
 NEW_SESSION="--new-session"   # -i: keep the terminal session (job control), like docker run -i
@@ -20,6 +45,7 @@ OUT_IF=""                     # -nIFACE: mirror IFACE inside and pin pasta's soc
 DNS_FWD=169.254.1.1
 while true; do
   case "$1" in
+    --help) help ;;
     -i|--interactive) NEW_SESSION=""; shift ;;
     -w|--workdir)
       WD="$(realpath -e "$2")" || { echo "sandbox.sh: workdir not found: $2" >&2; exit 1; }
@@ -52,7 +78,8 @@ if [ -n "$OUT_IF" ]; then
   [ -z "$IPV6" ] || OUT_ARGS+=(--outbound-if6 "$OUT_IF")
 fi
 
-APP_NAME="${1:?usage: sandbox.sh [-i] [-w DIR] [-h DIR] /usr/bin/someapp [args...]}"; shift || true
+[ $# -ge 1 ] || usage
+APP_NAME="$1"; shift
 APP="$(which "$APP_NAME" || true)"   # unlike `command -v`, always a disk file, even for builtin names
 [ -n "$APP" ] || { echo "sandbox.sh: app not found: $APP_NAME" >&2; exit 1; }
 case "$APP" in /*) ;; *) APP="$(realpath -e "$APP")" ;; esac   # e.g. ./local-app
