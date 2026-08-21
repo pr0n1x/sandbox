@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -eu
 
-usage() { echo "usage: sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home] [-n|--net] [-6|--ipv6] /usr/bin/someapp [args...]" >&2; exit 2; }
+usage() { echo "usage: sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home] [-n|--net] [-6|--ipv6] [-o|--outbound IFACE] /usr/bin/someapp [args...]" >&2; exit 2; }
 
 # '+' stops parsing at the first non-option, so the app's own flags pass through untouched
-OPTS=$(getopt -o +iw:h:an6 -l interactive,workdir:,home:,app-home,net,ipv6 -n sandbox.sh -- "$@") || usage
+OPTS=$(getopt -o +iw:h:an6o: -l interactive,workdir:,home:,app-home,net,ipv6,outbound: -n sandbox.sh -- "$@") || usage
 eval set -- "$OPTS"
 
 NEW_SESSION="--new-session"   # -i: keep the terminal session (job control), like docker run -i
@@ -15,6 +15,8 @@ NET=""                        # -n: pasta attaches to the sandbox netns for outb
 NET_ARGS=()                   # -n: root mapping inside the sandbox userns
 RESOLV_ARGS=()                # -n: DNS goes through pasta's forwarder
 PASTA_IP=(-4)                 # -6: also enable IPv6 in the sandbox network; default IPv4-only
+IPV6=""
+OUT_IF=""                     # -o IFACE: mirror IFACE inside and pin pasta's sockets to it
 DNS_FWD=169.254.1.1
 while true; do
   case "$1" in
@@ -24,21 +26,31 @@ while true; do
       WORKDIR_ARGS=(--bind "$WD" "$WD" --chdir "$WD"); shift 2 ;;
     -h|--home) BOX="$(realpath -m "$2")"; shift 2 ;;
     -a|--app-home) APP_HOME=1; shift ;;
-    -6|--ipv6) PASTA_IP=(); shift ;;
-    # --uid 0: pasta can only gain caps in the sandbox userns if its uid maps to
-    # root there (its self-hardening blocks the join otherwise), so with -n the
-    # app runs as (fake) root inside, like rootless podman/docker containers
-    -n|--net)
-      NET=1
-      NET_ARGS=(--uid 0 --gid 0)
-      # bind at the symlink target (e.g. systemd-resolved's stub under /run),
-      # creating its directory; must come after the /etc bind or it gets buried
-      RESOLV="$(realpath -m /etc/resolv.conf)"
-      RESOLV_ARGS=(--perms 0755 --dir "${RESOLV%/*}" --ro-bind-data 9 "$RESOLV")
-      shift ;;
+    -6|--ipv6) PASTA_IP=(); IPV6=1; shift ;;
+    -n|--net) NET=1; shift ;;
+    -o|--outbound) OUT_IF="$2"; NET=1; shift 2 ;;   # implies -n
     --) shift; break ;;
   esac
 done
+
+if [ -n "$NET" ]; then
+  # --uid 0: pasta can only gain caps in the sandbox userns if its uid maps to
+  # root there (its self-hardening blocks the join otherwise), so with -n the
+  # app runs as (fake) root inside, like rootless podman/docker containers
+  NET_ARGS=(--uid 0 --gid 0)
+  # bind at the symlink target (e.g. systemd-resolved's stub under /run),
+  # creating its directory; must come after the /etc bind or it gets buried
+  RESOLV="$(realpath -m /etc/resolv.conf)"
+  RESOLV_ARGS=(--perms 0755 --dir "${RESOLV%/*}" --ro-bind-data 9 "$RESOLV")
+fi
+OUT_ARGS=()
+if [ -n "$OUT_IF" ]; then
+  ip link show dev "$OUT_IF" >/dev/null || { echo "sandbox.sh: no such interface: $OUT_IF" >&2; exit 1; }
+  # SO_BINDTODEVICE pins pasta's host sockets to IFACE, so its traffic bypasses
+  # e.g. a WireGuard fwmark default route and leaves through IFACE itself
+  OUT_ARGS=(-i "$OUT_IF" --outbound-if4 "$OUT_IF")
+  [ -z "$IPV6" ] || OUT_ARGS+=(--outbound-if6 "$OUT_IF")
+fi
 
 APP_NAME="${1:?usage: sandbox.sh [-i] [-w DIR] [-h DIR] /usr/bin/someapp [args...]}"; shift || true
 APP="$(which "$APP_NAME" || true)"   # unlike `command -v`, always a disk file, even for builtin names
@@ -112,7 +124,7 @@ CHILD_PID="$(sed -n 's/.*"child-pid": *\([0-9][0-9]*\).*/\1/p' <<<"$STATUS_LINE"
 [ -n "$CHILD_PID" ] ||
   { echo "sandbox.sh: bwrap did not report a child pid" >&2; kill -9 "$BWRAP_PID" 2>/dev/null; exit 1; }
 
-pasta --config-net --quiet "${PASTA_IP[@]}" --dns-forward "$DNS_FWD" \
+pasta --config-net --quiet "${PASTA_IP[@]}" "${OUT_ARGS[@]}" --dns-forward "$DNS_FWD" \
       --userns "/proc/$CHILD_PID/ns/user" --netns "/proc/$CHILD_PID/ns/net" ||
   { echo "sandbox.sh: pasta failed (is the passt package installed?)" >&2; kill -9 "$CHILD_PID" "$BWRAP_PID" 2>/dev/null; exit 1; }
 

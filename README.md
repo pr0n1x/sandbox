@@ -27,7 +27,7 @@ that you don't fully trust.
 ## Usage
 
 ```sh
-sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home] [-n|--net] [-6|--ipv6] /usr/bin/someapp [args...]
+sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home] [-n|--net] [-6|--ipv6] [-o|--outbound IFACE] /usr/bin/someapp [args...]
 ```
 
 - `-i`, `--interactive` — drop `--new-session` so an interactive shell inside
@@ -60,6 +60,14 @@ sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home]
 - `-6`, `--ipv6` — with `-n`, also enable IPv6 in the sandbox network; the
   default is IPv4-only (pasta `-4`). On hosts with IPv6 disabled, pasta then
   prints `No routable interface for IPv6` and falls back to IPv4.
+- `-o IFACE`, `--outbound IFACE` — implies `-n`; mirror IFACE inside the
+  sandbox (pasta `-i`) and pin pasta's host sockets to it
+  (`--outbound-if4`, via `SO_BINDTODEVICE`). Bound sockets bypass policy
+  routing, so this sends sandbox traffic straight out of IFACE even when a
+  WireGuard tunnel with `AllowedIPs 0.0.0.0/0` owns the host's default route
+  — e.g. `-o enp39s0` gives the sandbox the physical uplink while the host
+  stays on the VPN. Caveat: DNS is forwarded to the host resolver
+  (systemd-resolved), whose own upstream queries still follow host routing.
 
 The app name is resolved with `which`, so `sandbox.sh ping` and
 `sandbox.sh /usr/bin/ping` run the same binary and (with `-a`) use the same
