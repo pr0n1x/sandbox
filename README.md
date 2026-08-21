@@ -89,7 +89,12 @@ sandbox directory.
   `--ro-bind /tmp/.X11-unix/X0 /tmp/.X11-unix/X0 --setenv DISPLAY :0`.
 - Electron/Chromium apps may need their own `--no-sandbox` flag; the outer
   sandbox is still provided by bwrap.
-- `ping` under `-n` sends packets (the sandbox grants `CAP_NET_RAW`), but
+- The app binary's file capabilities (e.g. ping's `cap_net_raw=ep`), which
+  `no_new_privs` would otherwise drop at exec, are mirrored into the sandbox
+  as ambient capabilities — they apply only inside the sandbox's own
+  namespaces. Note that without `-n`'s root mapping, Ubuntu's userns
+  hardening still blocks some uses of them (e.g. raw sockets).
+- `ping` under `-n` sends packets (via the mirrored `CAP_NET_RAW`), but
   replies only come back if the host allows unprivileged ping sockets, which
   pasta uses to relay ICMP:
 

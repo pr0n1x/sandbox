@@ -28,7 +28,7 @@ while true; do
     # app runs as (fake) root inside, like rootless podman/docker containers
     -n|--net)
       NET=1
-      NET_ARGS=(--uid 0 --gid 0 --cap-add CAP_NET_RAW)   # NET_RAW so ping can open its socket
+      NET_ARGS=(--uid 0 --gid 0)
       # bind at the symlink target (e.g. systemd-resolved's stub under /run),
       # creating its directory; must come after the /etc bind or it gets buried
       RESOLV="$(realpath -m /etc/resolv.conf)"
@@ -43,6 +43,15 @@ APP="$(which "$APP_NAME" || true)"   # unlike `command -v`, always a disk file, 
 [ -n "$APP" ] || { echo "sandbox.sh: app not found: $APP_NAME" >&2; exit 1; }
 case "$APP" in /*) ;; *) APP="$(realpath -e "$APP")" ;; esac   # e.g. ./local-app
 
+# mirror the binary's file capabilities (e.g. ping's cap_net_raw=ep), which
+# no_new_privs would silently drop at exec, as ambient caps in the sandbox userns
+CAP_ARGS=()
+CAPS="$(getcap "$APP" 2>/dev/null)"; CAPS="${CAPS##* }"; CAPS="${CAPS%%[=+]*}"
+if [[ "$CAPS" == cap_* ]]; then
+  IFS=, read -ra CAP_LIST <<<"$CAPS"
+  for CAP in "${CAP_LIST[@]}"; do CAP_ARGS+=(--cap-add "${CAP^^}"); done
+fi
+
 # the sandbox "home": -h DIR as given; -a per-app ~/sandboxes/usr/bin/foo; default shared ~/sandboxes/home/user
 if [ -z "$BOX" ]; then
   if [ -n "$APP_HOME" ]; then BOX="$HOME/sandboxes$APP"; else BOX="$HOME/sandboxes$HOME"; fi
@@ -54,6 +63,7 @@ WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 BWRAP_ARGS=(
   --unshare-all
   "${NET_ARGS[@]}"
+  "${CAP_ARGS[@]}"
   --die-with-parent
   $NEW_SESSION
   --hostname sandbox
