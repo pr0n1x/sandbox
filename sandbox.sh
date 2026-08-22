@@ -98,6 +98,14 @@ APP="$(which "$APP_NAME" || true)"   # unlike `command -v`, always a disk file, 
 [ -n "$APP" ] || { echo "sandbox.sh: app not found: $APP_NAME" >&2; exit 1; }
 case "$APP" in /*) ;; *) APP="$(realpath -e "$APP")" ;; esac   # e.g. ./local-app
 
+# a snap's binary run directly (realpath /snap/foo/current/...): expose /snap
+# and forbid nested user namespaces. Snap builds never run their own userns
+# sandbox under snapd (AppArmor denies it), and e.g. the firefox snap segfaults
+# in every content process when that path is reachable; with --disable-userns
+# the app sees clone() fail and falls back cleanly, as under Flatpak
+SNAP_ARGS=()
+case "$APP" in /snap/*) SNAP_ARGS=(--ro-bind /snap /snap --unshare-user --disable-userns) ;; esac
+
 # mirror the binary's file capabilities (e.g. ping's cap_net_raw=ep), which
 # no_new_privs would silently drop at exec, as ambient caps in the sandbox userns
 CAP_ARGS=()
@@ -126,6 +134,7 @@ BWRAP_ARGS=(
   --symlink usr/bin /bin --symlink usr/sbin /sbin
   --symlink usr/lib /lib --symlink usr/lib64 /lib64
   --ro-bind-try /opt /opt
+  "${SNAP_ARGS[@]}"
   --ro-bind /etc /etc
   "${RESOLV_ARGS[@]}"
   --proc /proc

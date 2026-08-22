@@ -28,6 +28,13 @@ that you don't fully trust.
   theme. Apps that only listen to the desktop portal (libadwaita, Electron)
   won't pick it up — that would need the D-Bus session bus.
 - **No terminal control** by default (`--new-session`).
+- **Snap binaries** (app path under `/snap`, e.g.
+  `` sandbox "$(realpath /snap/firefox/current/usr/lib/firefox/firefox)" ``):
+  `/snap` is bound read-only and nested user namespaces are forbidden
+  (`--disable-userns`). Run outside snapd, the binary uses the host's libs;
+  the userns ban makes apps whose snap build crashes on its own
+  namespace sandbox (Firefox: every content process segfaults) fall back
+  cleanly, as under Flatpak.
 
 ## Usage
 
