@@ -153,6 +153,9 @@ BWRAP_ARGS=(
   --ro-bind-try "$HOME/.config/qt6ct" "$HOME/.config/qt6ct"
   --ro-bind-try "$HOME/.themes" "$HOME/.themes"
   --ro-bind-try "$HOME/.icons" "$HOME/.icons"
+  # GTK on Wayland takes theme and titlebar-button layout from GSettings, which
+  # override settings.ini; dconf reads its db by mmap, so no D-Bus is needed
+  --ro-bind-try "$HOME/.config/dconf/user" "$HOME/.config/dconf/user"
   "${WORKDIR_ARGS[@]}"
   --perms 0700 --dir "$XDG_RUNTIME_DIR"
   --ro-bind "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"

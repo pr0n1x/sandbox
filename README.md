@@ -23,9 +23,12 @@ that you don't fully trust.
 - **Wayland GUI, GPU and sound**: the Wayland socket, `/dev/dri` and
   PipeWire/PulseAudio sockets are passed through. D-Bus is deliberately not.
 - **System appearance**: the host's theme configs (`~/.config/kdeglobals`,
-  GTK `settings.ini`, `qt5ct`/`qt6ct`, `~/.themes`, `~/.icons`) are bound
-  read-only into the box home, so Qt/GTK apps follow the host dark/light
-  theme. Apps that only listen to the desktop portal (libadwaita, Electron)
+  GTK `settings.ini`, `qt5ct`/`qt6ct`, `~/.themes`, `~/.icons`, and the
+  dconf database `~/.config/dconf/user`) are bound read-only into the box
+  home, so Qt/GTK apps follow the host dark/light theme. The dconf db
+  matters on Wayland: GTK takes the theme and the titlebar-button layout
+  (KDE syncs both into GSettings) from there, overriding `settings.ini` —
+  without it Firefox draws GNOME's `menu:close` buttons in Adwaita. Apps that only listen to the desktop portal (libadwaita, Electron)
   won't pick it up — that would need the D-Bus session bus.
 - **No terminal control** by default (`--new-session`).
 - **Snap binaries** (app path under `/snap`, e.g.
