@@ -71,5 +71,9 @@ for S in 512 256 128 96 64 48 32 24 22 16; do
   magick "$TMP/master.png" -resize "${S}x${S}" "$DEST/${S}x${S}/apps/$NAME.png"
 done
 [ -f "$DEST/index.theme" ] || cp /usr/share/icons/hicolor/index.theme "$DEST/" 2>/dev/null || true
+# GTK reads a prebuilt index; KDE has only a lazy runtime cache (KIconLoader),
+# so instead tell running KDE apps to drop it — matters when re-badging an
+# existing name or when a launcher was shown before its icon existed
 gtk-update-icon-cache -q -t -f "$DEST" 2>/dev/null || true
+dbus-send --session --type=signal /KIconLoader org.kde.KIconLoader.iconChanged int32:0 2>/dev/null || true
 echo "$NAME"
