@@ -22,8 +22,8 @@ options:
   -H, --home DIR      use DIR as the sandbox home
                       (default: the shared box ~/sandboxes\$HOME)
   -a, --app-home      per-app sandbox home instead: ~/sandboxes/<binary path>
-  -n, --net[IFACE]    outbound networking via pasta (rootless NAT); the app
-                      runs as fake root inside. With an attached IFACE
+  -n, --net[IFACE]    outbound networking via pasta (rootless NAT); snap
+                      apps run as fake root inside. With an attached IFACE
                       (-nenp39s0 / --net=enp39s0) traffic is pinned to that
                       interface, bypassing e.g. a WireGuard default route
   -6, --ipv6          with -n: also enable IPv6 (default is IPv4-only)
@@ -165,6 +165,23 @@ case "$APP" in /snap/*)
   [ -n "$NET" ] || SNAP_ARGS+=(--unshare-user --disable-userns) ;;
 esac
 
+# -n maps the real uid to 0 (for pasta, see above), which would leave the app
+# running as root with every user-owned file shown as root:root. Undo that for
+# the app itself: nest a second userns mapping 0 back to the real uid/gid, so
+# ownership looks normal again (like podman unshare in reverse). Ubuntu's
+# userns restriction strips capabilities from the creator (the app can't
+# write its own uid_map), so the app just waits for the mapping while
+# sandbox.sh writes it from outside — joining/holding a userns isn't gated,
+# only creating one. Snaps keep the fake root: their nested userns is
+# forbidden. Raw-socket caps don't survive into the nested ns, but the ping
+# sysctl below still applies (gid 1000 inner = gid 0 outer, still in range)
+APP_WRAP=()
+[ -z "$NET" ] || [ -n "$SNAP" ] || APP_WRAP=(unshare -U sh -c
+  'n=0; while [ "$(id -u)" = 65534 ]; do
+     [ "$((n+=1))" -lt 100 ] || { echo "sandbox.sh: no uid map after 5s" >&2; exit 1; }
+     sleep 0.05
+   done; exec "$0" "$@"')
+
 # mirror the binary's file capabilities (e.g. ping's cap_net_raw=ep), which
 # no_new_privs would silently drop at exec, as ambient caps in the sandbox userns
 CAP_ARGS=()
@@ -250,7 +267,7 @@ mkfifo "$TMP/status" "$TMP/block"
 exec {STATUS_FD}<>"$TMP/status" {BLOCK_FD}<>"$TMP/block"   # rw so opens never block
 
 bwrap --json-status-fd "$STATUS_FD" --block-fd "$BLOCK_FD" "${BWRAP_ARGS[@]}" \
-  "$APP" "$@" 9<<<"nameserver $DNS_FWD" &
+  "${APP_WRAP[@]}" "$APP" "$@" 9<<<"nameserver $DNS_FWD" &
 BWRAP_PID=$!
 
 # first status message arrives once the namespaces exist; it also carries
@@ -274,5 +291,32 @@ SYSCTLS='echo 0 0 > /proc/sys/net/ipv4/ping_group_range'
 [ -z "$SNAP" ] || SYSCTLS="$SYSCTLS; echo 0 > /proc/sys/user/max_user_namespaces"
 nsenter --preserve-credentials -U -n -t "$CHILD_PID" sh -c "$SYSCTLS" 2>/dev/null || true
 
+OUTER_NS="$(readlink "/proc/$CHILD_PID/ns/user")"
 echo >&"$BLOCK_FD"   # network is up; release the app
+
+# the released app (see APP_WRAP) now unshares its nested userns and waits;
+# once that shows up, write the 0 -> real uid/gid mapping from here. The app
+# is a child of bwrap's mini-init (CHILD_PID, still in the outer ns).
+# nsenter into the outer ns first (via the init): the maps may only be
+# written from the nested ns's parent userns, and the host is the
+# grandparent. As the outer ns owns the nested one, joining it grants the
+# needed caps, and a single line mapping one's own euid/egid is always allowed
+if [ ${#APP_WRAP[@]} -gt 0 ]; then
+  MAPPED=""
+  for _ in $(seq 100); do
+    [ -d "/proc/$CHILD_PID" ] || break   # app already gone
+    APP_PID="$(awk '{print $1}' "/proc/$CHILD_PID/task/$CHILD_PID/children" 2>/dev/null)"
+    if [ -n "$APP_PID" ] &&
+       [ "$(readlink "/proc/$APP_PID/ns/user" 2>/dev/null)" != "$OUTER_NS" ]; then
+      nsenter --preserve-credentials -U -t "$CHILD_PID" sh -c \
+        "echo deny > /proc/$APP_PID/setgroups
+         echo '$(id -g) 0 1' > /proc/$APP_PID/gid_map
+         echo '$(id -u) 0 1' > /proc/$APP_PID/uid_map" && MAPPED=1
+      break
+    fi
+    sleep 0.05
+  done
+  [ -n "$MAPPED" ] ||
+    echo "sandbox.sh: setting the app's uid map failed; it runs as nobody" >&2
+fi
 wait "$BWRAP_PID"

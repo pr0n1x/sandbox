@@ -73,10 +73,17 @@ sandbox.sh [-i|--interactive] [-w|--workdir DIR]... [-b|--bind DIR]... [-r|--bin
   existing namespace instead of creating one, it needs no AppArmor userns
   profile of its own. DNS goes through pasta's `--dns-forward` to the host's
   real resolver, so systemd-resolved and VPN/split-DNS setups keep working.
-  With `-n` the app runs as (fake) root inside its user namespace, like
-  rootless podman/docker containers — pasta's self-hardening only lets it
-  gain the needed capabilities in the sandbox userns when its uid maps to
-  root there. Requires the `passt` package. TCP/UDP (curl, browsers) work out
+  With `-n` the sandbox userns maps the real uid to root — pasta's
+  self-hardening only lets it gain the needed capabilities there when its uid
+  maps to root. The app itself still runs under the real uid: it is nested
+  into a second userns mapping root back, so files keep their normal
+  ownership (without this everything the user owns shows as `root:root`).
+  Ubuntu's userns restriction strips the sandboxed app of the capabilities
+  needed to write its own uid map, so sandbox.sh writes the map from outside,
+  from the parent (sandbox) userns — joining one isn't gated, only creating.
+  Exception: snap apps keep the fake root, since their nested userns is
+  deliberately forbidden (see above).
+  Requires the `passt` package. TCP/UDP (curl, browsers) work out
   of the box; `ping` replies additionally need unprivileged ping sockets
   enabled on the host — see the ICMP note in Notes below.
 - `-6`, `--ipv6` — with `-n`, also enable IPv6 in the sandbox network; the
