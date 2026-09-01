@@ -203,8 +203,22 @@ BWRAP_ARGS=(
   --setenv WAYLAND_DISPLAY "$WAYLAND_DISPLAY"
   --ro-bind-try "$XDG_RUNTIME_DIR/pipewire-0" "$XDG_RUNTIME_DIR/pipewire-0"
   --ro-bind-try "$XDG_RUNTIME_DIR/pulse" "$XDG_RUNTIME_DIR/pulse"
+  # gtk3-nocsd forces server-side titlebars onto every GTK app via env; the
+  # preload works inside too (/usr is bound) and silently overrides the app's
+  # own decoration setting (e.g. firefox's titlebar checkbox), so strip it
+  --unsetenv GTK_CSD
   --unsetenv DBUS_SESSION_BUS_ADDRESS
 )
+if [ -n "${LD_PRELOAD:-}" ]; then
+  PRELOAD=""
+  for LIB in ${LD_PRELOAD//:/ }; do
+    case "$LIB" in *nocsd*) ;; *) PRELOAD="$PRELOAD:$LIB" ;; esac
+  done
+  if [ -n "${PRELOAD#:}" ]
+  then BWRAP_ARGS+=(--setenv LD_PRELOAD "${PRELOAD#:}")
+  else BWRAP_ARGS+=(--unsetenv LD_PRELOAD)
+  fi
+fi
 
 [ -n "$NET" ] || exec bwrap "${BWRAP_ARGS[@]}" "$APP" "$@"
 
