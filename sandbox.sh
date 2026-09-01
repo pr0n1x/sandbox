@@ -39,6 +39,15 @@ EOF
 OPTS=$(getopt -o +iw:b:r:d:hH:an::6x -l help,interactive,workdir:,bind:,bind-ro:,chdir:,home:,app-home,net::,ipv6,x11 -n sandbox.sh -- "$@") || usage
 eval set -- "$OPTS"
 
+# -w/-b/-r DIR: bind DIR's real path ($1: --bind/--ro-bind); a symlink DIR is
+# also recreated inside the sandbox, so the path as given keeps working
+bind_dir() {
+  BOUND="$(realpath -e "$2")" || { echo "sandbox.sh: bind dir not found: $2" >&2; exit 1; }
+  BIND_ARGS+=("$1" "$BOUND" "$BOUND")
+  local ORIG; ORIG="$(realpath -se "$2")"   # absolute, but symlinks unresolved
+  [ "$ORIG" = "$BOUND" ] || BIND_ARGS+=(--symlink "$BOUND" "$ORIG")
+}
+
 NEW_SESSION="--new-session"   # -i: keep the terminal session (job control), like docker run -i
 BIND_ARGS=()                  # -w/-b/-r DIR (repeatable): rw-/ro-bind DIR at its real path
 WD=""                         # the last -w DIR: chdir there
@@ -58,15 +67,9 @@ while true; do
   case "$1" in
     -h|--help) help ;;
     -i|--interactive) NEW_SESSION=""; shift ;;
-    -w|--workdir)
-      WD="$(realpath -e "$2")" || { echo "sandbox.sh: workdir not found: $2" >&2; exit 1; }
-      BIND_ARGS+=(--bind "$WD" "$WD"); shift 2 ;;
-    -b|--bind)
-      RW="$(realpath -e "$2")" || { echo "sandbox.sh: bind dir not found: $2" >&2; exit 1; }
-      BIND_ARGS+=(--bind "$RW" "$RW"); shift 2 ;;
-    -r|--bind-ro)
-      RO="$(realpath -e "$2")" || { echo "sandbox.sh: bind dir not found: $2" >&2; exit 1; }
-      BIND_ARGS+=(--ro-bind "$RO" "$RO"); shift 2 ;;
+    -w|--workdir) bind_dir --bind "$2"; WD="$BOUND"; shift 2 ;;
+    -b|--bind) bind_dir --bind "$2"; shift 2 ;;
+    -r|--bind-ro) bind_dir --ro-bind "$2"; shift 2 ;;
     -d|--chdir) CD="$(realpath -m "$2")"; shift 2 ;;
     -H|--home) BOX="$(realpath -m "$2")"; shift 2 ;;
     -a|--app-home) APP_HOME=1; shift ;;

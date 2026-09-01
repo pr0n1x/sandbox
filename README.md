@@ -53,6 +53,9 @@ sandbox.sh [-i|--interactive] [-w|--workdir DIR]... [-b|--bind DIR]... [-r|--bin
   sandbox and start the app there (like `docker run -w`); if repeated, the app
   starts in the last one. This is the way to hand the app a specific
   project/data directory while the rest of `$HOME` stays hidden.
+  A symlink DIR is dereferenced: its target is bound at the target's path and
+  the symlink itself is recreated inside the sandbox, so the path as given
+  keeps working (same for `-b`/`-r`).
 - `-b DIR`, `--bind DIR` — like `-w`, but without changing the start
   directory; repeatable.
 - `-r DIR`, `--bind-ro DIR` — like `-b`, but read-only; repeatable.
