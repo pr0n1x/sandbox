@@ -217,5 +217,12 @@ pasta --config-net --quiet "${PASTA_IP[@]}" "${OUT_ARGS[@]}" "${FWD_ARGS[@]}" \
       --userns "/proc/$CHILD_PID/ns/user" --netns "/proc/$CHILD_PID/ns/net" ||
   { echo "sandbox.sh: pasta failed (is the passt package installed?)" >&2; kill -9 "$CHILD_PID" "$BWRAP_PID" 2>/dev/null; exit 1; }
 
+# a fresh netns has net.ipv4.ping_group_range empty, and modern ping drops its
+# file caps and only tries unprivileged ICMP datagram sockets, gated by that
+# sysctl; /proc/sys/net follows the writer's netns, so no mount ns join needed.
+# Only gid 0 is mapped in the sandbox userns, so "0 0" is the widest legal range
+nsenter --preserve-credentials -U -n -t "$CHILD_PID" \
+  sh -c 'echo 0 0 > /proc/sys/net/ipv4/ping_group_range' 2>/dev/null || true
+
 echo >&"$BLOCK_FD"   # network is up; release the app
 wait "$BWRAP_PID"
