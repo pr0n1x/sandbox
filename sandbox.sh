@@ -136,7 +136,14 @@ SNAP=""
 SNAP_ARGS=()
 case "$APP" in /snap/*)
   SNAP=1
-  SNAP_ARGS=(--ro-bind /snap /snap)
+  # launcher scripts exec "$SNAP/...", which snapd normally provides. The
+  # name vars matter too: e.g. firefox keys per-install profile selection on
+  # them — without SNAP_INSTANCE_NAME it hashes its versioned /snap/<name>/<rev>
+  # path as the install identity and orphans the profile on every snap refresh
+  SNAPNAME="${APP#/snap/}"; SNAPREST="${SNAPNAME#*/}"; SNAPNAME="${SNAPNAME%%/*}"
+  SNAPDIR="/snap/$SNAPNAME/${SNAPREST%%/*}"
+  SNAP_ARGS=(--ro-bind /snap /snap --setenv SNAP "$SNAPDIR"
+             --setenv SNAP_NAME "$SNAPNAME" --setenv SNAP_INSTANCE_NAME "$SNAPNAME")
   [ -n "$NET" ] || SNAP_ARGS+=(--unshare-user --disable-userns) ;;
 esac
 
