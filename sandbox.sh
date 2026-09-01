@@ -128,9 +128,17 @@ case "$APP" in /*) ;; *) APP="$(realpath -e "$APP")" ;; esac   # e.g. ./local-ap
 # and forbid nested user namespaces. Snap builds never run their own userns
 # sandbox under snapd (AppArmor denies it), and e.g. the firefox snap segfaults
 # in every content process when that path is reachable; with --disable-userns
-# the app sees clone() fail and falls back cleanly, as under Flatpak
+# the app sees clone() fail and falls back cleanly, as under Flatpak.
+# --disable-userns works by nesting a second userns, whose parent owns the
+# netns — pasta can't control that from inside the nested ns, so with -n
+# forbid userns creation via sysctl instead, written from outside below
+SNAP=""
 SNAP_ARGS=()
-case "$APP" in /snap/*) SNAP_ARGS=(--ro-bind /snap /snap --unshare-user --disable-userns) ;; esac
+case "$APP" in /snap/*)
+  SNAP=1
+  SNAP_ARGS=(--ro-bind /snap /snap)
+  [ -n "$NET" ] || SNAP_ARGS+=(--unshare-user --disable-userns) ;;
+esac
 
 # mirror the binary's file capabilities (e.g. ping's cap_net_raw=ep), which
 # no_new_privs would silently drop at exec, as ambient caps in the sandbox userns
@@ -220,9 +228,12 @@ pasta --config-net --quiet "${PASTA_IP[@]}" "${OUT_ARGS[@]}" "${FWD_ARGS[@]}" \
 # a fresh netns has net.ipv4.ping_group_range empty, and modern ping drops its
 # file caps and only tries unprivileged ICMP datagram sockets, gated by that
 # sysctl; /proc/sys/net follows the writer's netns, so no mount ns join needed.
-# Only gid 0 is mapped in the sandbox userns, so "0 0" is the widest legal range
-nsenter --preserve-credentials -U -n -t "$CHILD_PID" \
-  sh -c 'echo 0 0 > /proc/sys/net/ipv4/ping_group_range' 2>/dev/null || true
+# Only gid 0 is mapped in the sandbox userns, so "0 0" is the widest legal range.
+# For snaps, zero max_user_namespaces: the app holds no caps and can't gain
+# any under no_new_privs, so it cannot raise the limit back
+SYSCTLS='echo 0 0 > /proc/sys/net/ipv4/ping_group_range'
+[ -z "$SNAP" ] || SYSCTLS="$SYSCTLS; echo 0 > /proc/sys/user/max_user_namespaces"
+nsenter --preserve-credentials -U -n -t "$CHILD_PID" sh -c "$SYSCTLS" 2>/dev/null || true
 
 echo >&"$BLOCK_FD"   # network is up; release the app
 wait "$BWRAP_PID"
