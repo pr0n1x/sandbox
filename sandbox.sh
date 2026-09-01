@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -eu
 
-usage() { echo "usage: sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home] [-n|--net[IFACE]] [-6|--ipv6] /usr/bin/someapp [args...]" >&2; exit 2; }
+usage() { echo "usage: sandbox.sh [-i|--interactive] [-w|--workdir DIR]... [-b|--bind DIR]... [-r|--bind-ro DIR]... [-d|--chdir DIR] [-H|--home DIR] [-a|--app-home] [-n|--net[IFACE]] [-6|--ipv6] /usr/bin/someapp [args...]" >&2; exit 2; }
 
 help() {
   cat <<EOF
@@ -15,7 +15,11 @@ options:
   -i, --interactive   keep the terminal session for job control, like
                       'docker run -i' (drops bwrap's --new-session)
   -w, --workdir DIR   rw-bind DIR at its real path and start the app there
-  -h, --home DIR      use DIR as the sandbox home
+                      (in the last one if repeated)
+  -b, --bind DIR      rw-bind DIR at its real path; repeatable
+  -r, --bind-ro DIR   ro-bind DIR at its real path; repeatable
+  -d, --chdir DIR     start the app in DIR (overrides -w's chdir)
+  -H, --home DIR      use DIR as the sandbox home
                       (default: the shared box ~/sandboxes\$HOME)
   -a, --app-home      per-app sandbox home instead: ~/sandboxes/<binary path>
   -n, --net[IFACE]    outbound networking via pasta (rootless NAT); the app
@@ -26,17 +30,19 @@ options:
   -x, --x11           pass the X11 socket and auth cookie through, for
                       X11-only apps (weakens isolation: X clients can snoop
                       each other)
-      --help          show this help
+  -h, --help          show this help
 EOF
   exit 0
 }
 
 # '+' stops parsing at the first non-option, so the app's own flags pass through untouched
-OPTS=$(getopt -o +iw:h:an::6x -l help,interactive,workdir:,home:,app-home,net::,ipv6,x11 -n sandbox.sh -- "$@") || usage
+OPTS=$(getopt -o +iw:b:r:d:hH:an::6x -l help,interactive,workdir:,bind:,bind-ro:,chdir:,home:,app-home,net::,ipv6,x11 -n sandbox.sh -- "$@") || usage
 eval set -- "$OPTS"
 
 NEW_SESSION="--new-session"   # -i: keep the terminal session (job control), like docker run -i
-WORKDIR_ARGS=()               # -w DIR: rw-bind DIR at its real path and start the app there
+BIND_ARGS=()                  # -w/-b/-r DIR (repeatable): rw-/ro-bind DIR at its real path
+WD=""                         # the last -w DIR: chdir there
+CD=""                         # --chdir DIR: start the app there (overrides -w's chdir)
 BOX=""                        # -h DIR: sandbox home; default is the shared box ~/sandboxes$HOME
 APP_HOME=""                   # -a: use a per-app box instead, ~/sandboxes/<binary path>
 NET=""                        # -n: pasta attaches to the sandbox netns for outbound networking
@@ -50,12 +56,19 @@ DNS_FWD=169.254.1.1
 FWD_ARGS=(--dns-forward "$DNS_FWD")
 while true; do
   case "$1" in
-    --help) help ;;
+    -h|--help) help ;;
     -i|--interactive) NEW_SESSION=""; shift ;;
     -w|--workdir)
       WD="$(realpath -e "$2")" || { echo "sandbox.sh: workdir not found: $2" >&2; exit 1; }
-      WORKDIR_ARGS=(--bind "$WD" "$WD" --chdir "$WD"); shift 2 ;;
-    -h|--home) BOX="$(realpath -m "$2")"; shift 2 ;;
+      BIND_ARGS+=(--bind "$WD" "$WD"); shift 2 ;;
+    -b|--bind)
+      RW="$(realpath -e "$2")" || { echo "sandbox.sh: bind dir not found: $2" >&2; exit 1; }
+      BIND_ARGS+=(--bind "$RW" "$RW"); shift 2 ;;
+    -r|--bind-ro)
+      RO="$(realpath -e "$2")" || { echo "sandbox.sh: bind dir not found: $2" >&2; exit 1; }
+      BIND_ARGS+=(--ro-bind "$RO" "$RO"); shift 2 ;;
+    -d|--chdir) CD="$(realpath -m "$2")"; shift 2 ;;
+    -H|--home) BOX="$(realpath -m "$2")"; shift 2 ;;
     -a|--app-home) APP_HOME=1; shift ;;
     -6|--ipv6) PASTA_IP=(); IPV6=1; shift ;;
     -x|--x11) X11=1; shift ;;
@@ -64,6 +77,8 @@ while true; do
     --) shift; break ;;
   esac
 done
+CD="${CD:-$WD}"
+[ -z "$CD" ] || BIND_ARGS+=(--chdir "$CD")
 
 if [ -n "$NET" ]; then
   # --uid 0: pasta can only gain caps in the sandbox userns if its uid maps to
@@ -197,7 +212,7 @@ BWRAP_ARGS=(
   # GTK on Wayland takes theme and titlebar-button layout from GSettings, which
   # override settings.ini; dconf reads its db by mmap, so no D-Bus is needed
   --ro-bind-try "$HOME/.config/dconf/user" "$HOME/.config/dconf/user"
-  "${WORKDIR_ARGS[@]}"
+  "${BIND_ARGS[@]}"
   --perms 0700 --dir "$XDG_RUNTIME_DIR"
   --ro-bind "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
   --setenv WAYLAND_DISPLAY "$WAYLAND_DISPLAY"

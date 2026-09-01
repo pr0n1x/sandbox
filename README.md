@@ -16,7 +16,7 @@ that you don't fully trust.
   through [pasta](https://passt.top/) while keeping the separate netns.
 - **Private home**: the app's `$HOME` is a bind mount of a sandbox dir —
   by default the shared box `~/sandboxes/<real-home-path>` (e.g.
-  `~/sandboxes/home/user`), or a per-app / explicit box via `-a` / `-h`.
+  `~/sandboxes/home/user`), or a per-app / explicit box via `-a` / `-H`.
   The real home directory is invisible.
 - **Read-only system**: `/usr`, `/etc`, `/opt`, `/sys` are bound read-only;
   `/tmp` is a fresh tmpfs.
@@ -42,7 +42,7 @@ that you don't fully trust.
 ## Usage
 
 ```sh
-sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] /usr/bin/someapp [args...]
+sandbox.sh [-i|--interactive] [-w|--workdir DIR]... [-b|--bind DIR]... [-r|--bind-ro DIR]... [-d|--chdir DIR] [-H|--home DIR] [-a|--app-home] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] /usr/bin/someapp [args...]
 ```
 
 - `-i`, `--interactive` — drop `--new-session` so an interactive shell inside
@@ -50,10 +50,14 @@ sandbox.sh [-i|--interactive] [-w|--workdir DIR] [-h|--home DIR] [-a|--app-home]
   kernel has `dev.tty.legacy_tiocsti = 0` (default on modern kernels), which
   blocks the TIOCSTI terminal-injection attack `--new-session` guards against.
 - `-w DIR`, `--workdir DIR` — bind DIR read-write at its real path inside the
-  sandbox and start the app there (like `docker run -w`). This is the way to
-  hand the app a specific project/data directory while the rest of `$HOME`
-  stays hidden.
-- `-h DIR`, `--home DIR` — use DIR as the sandbox home (created if missing).
+  sandbox and start the app there (like `docker run -w`); if repeated, the app
+  starts in the last one. This is the way to hand the app a specific
+  project/data directory while the rest of `$HOME` stays hidden.
+- `-b DIR`, `--bind DIR` — like `-w`, but without changing the start
+  directory; repeatable.
+- `-r DIR`, `--bind-ro DIR` — like `-b`, but read-only; repeatable.
+- `-d DIR`, `--chdir DIR` — start the app in DIR, overriding `-w`'s chdir.
+- `-H DIR`, `--home DIR` — use DIR as the sandbox home (created if missing).
   Overrides `-a`.
 - `-a`, `--app-home` — use a per-app box, `~/sandboxes/<full-path-of-binary>`
   (e.g. `/usr/bin/foo` → `~/sandboxes/usr/bin/foo`), instead of the default
