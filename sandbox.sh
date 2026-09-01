@@ -47,6 +47,7 @@ IPV6=""
 OUT_IF=""                     # -nIFACE: mirror IFACE inside and pin pasta's sockets to it
 X11=""                        # -x: pass the X11 socket through (weakens isolation)
 DNS_FWD=169.254.1.1
+FWD_ARGS=(--dns-forward "$DNS_FWD")
 while true; do
   case "$1" in
     --help) help ;;
@@ -90,6 +91,31 @@ if [ -n "$OUT_IF" ]; then
   # e.g. a WireGuard fwmark default route and leaves through IFACE itself
   OUT_ARGS=(-i "$OUT_IF" --outbound-if4 "$OUT_IF")
   [ -z "$IPV6" ] || OUT_ARGS+=(--outbound-if6 "$OUT_IF")
+  # pinned sockets can't reach a loopback resolver (systemd-resolved's
+  # 127.0.0.53 stub, pasta's default --dns-host from /etc/resolv.conf), so
+  # forward DNS to IFACE's own upstream servers instead — not the global list,
+  # which may hold servers only reachable through the tunnel being bypassed.
+  # --dns-host takes one server per IP version: first v4, and first v6 with -6
+  if UPSTREAM="$(resolvectl dns "$OUT_IF" 2>/dev/null)"; then
+    NS4=""; NS6=""
+    for NS in ${UPSTREAM#*:}; do
+      case "$NS" in
+        *:*) [ -n "$NS6" ] || NS6="$NS" ;;
+        *)   [ -n "$NS4" ] || NS4="$NS" ;;
+      esac
+    done
+    if pasta --help 2>&1 | grep -q -- --dns-host; then
+      [ -z "$NS4" ] || OUT_ARGS+=(--dns-host "$NS4")
+      [ -z "$NS6" ] || [ -z "$IPV6" ] || OUT_ARGS+=(--dns-host "$NS6")
+    elif [ -n "$NS4" ]; then
+      # old pasta (< 2024_10_30, e.g. Ubuntu 24.04) can't retarget the
+      # forwarder: skip it and point the sandbox resolv.conf straight at the
+      # upstream server; --no-map-gw so a gateway-hosted DNS reaches the real
+      # gateway instead of being remapped to the host
+      DNS_FWD="$NS4"
+      FWD_ARGS=(--no-map-gw --dns none)   # --dns none: no "Couldn't get any nameserver" noise
+    fi
+  fi
 fi
 
 [ $# -ge 1 ] || usage
@@ -187,7 +213,7 @@ CHILD_PID="$(sed -n 's/.*"child-pid": *\([0-9][0-9]*\).*/\1/p' <<<"$STATUS_LINE"
 [ -n "$CHILD_PID" ] ||
   { echo "sandbox.sh: bwrap did not report a child pid" >&2; kill -9 "$BWRAP_PID" 2>/dev/null; exit 1; }
 
-pasta --config-net --quiet "${PASTA_IP[@]}" "${OUT_ARGS[@]}" --dns-forward "$DNS_FWD" \
+pasta --config-net --quiet "${PASTA_IP[@]}" "${OUT_ARGS[@]}" "${FWD_ARGS[@]}" \
       --userns "/proc/$CHILD_PID/ns/user" --netns "/proc/$CHILD_PID/ns/net" ||
   { echo "sandbox.sh: pasta failed (is the passt package installed?)" >&2; kill -9 "$CHILD_PID" "$BWRAP_PID" 2>/dev/null; exit 1; }
 
