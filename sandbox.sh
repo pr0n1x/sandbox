@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -eu
 
-usage() { echo "usage: sandbox.sh [-i|--interactive] [-w|--workdir DIR]... [-b|--bind DIR]... [-r|--bind-ro DIR]... [-d|--chdir DIR] [-H|--home DIR] [-a|--app-home] [-n|--net[IFACE]] [-6|--ipv6] /usr/bin/someapp [args...]" >&2; exit 2; }
+usage() { echo "usage: sandbox.sh [-i|--interactive] [-w|--workdir DIR]... [-b|--bind DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-H|--home DIR] [-a|--app-home] [-n|--net[IFACE]] [-6|--ipv6] /usr/bin/someapp [args...]" >&2; exit 2; }
 
 help() {
   cat <<EOF
@@ -17,7 +17,7 @@ options:
   -w, --workdir DIR   rw-bind DIR at its real path and start the app there
                       (in the last one if repeated)
   -b, --bind DIR      rw-bind DIR at its real path; repeatable
-  -r, --bind-ro DIR   ro-bind DIR at its real path; repeatable
+  -r, --ro-bind DIR   ro-bind DIR at its real path; repeatable
   -d, --chdir DIR     start the app in DIR (overrides -w's chdir)
   -H, --home DIR      use DIR as the sandbox home
                       (default: the shared box ~/sandboxes\$HOME)
@@ -36,7 +36,7 @@ EOF
 }
 
 # '+' stops parsing at the first non-option, so the app's own flags pass through untouched
-OPTS=$(getopt -o +iw:b:r:d:hH:an::6x -l help,interactive,workdir:,bind:,bind-ro:,chdir:,home:,app-home,net::,ipv6,x11 -n sandbox.sh -- "$@") || usage
+OPTS=$(getopt -o +iw:b:r:d:hH:an::6x -l help,interactive,workdir:,bind:,ro-bind:,chdir:,home:,app-home,net::,ipv6,x11 -n sandbox.sh -- "$@") || usage
 eval set -- "$OPTS"
 
 # -w/-b/-r DIR: bind DIR's real path ($1: --bind/--ro-bind); a symlink DIR is
@@ -69,7 +69,7 @@ while true; do
     -i|--interactive) NEW_SESSION=""; shift ;;
     -w|--workdir) bind_dir --bind "$2"; WD="$BOUND"; shift 2 ;;
     -b|--bind) bind_dir --bind "$2"; shift 2 ;;
-    -r|--bind-ro) bind_dir --ro-bind "$2"; shift 2 ;;
+    -r|--ro-bind) bind_dir --ro-bind "$2"; shift 2 ;;
     -d|--chdir) CD="$(realpath -m "$2")"; shift 2 ;;
     -H|--home) BOX="$(realpath -m "$2")"; shift 2 ;;
     -a|--app-home) APP_HOME=1; shift ;;

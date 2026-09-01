@@ -42,7 +42,7 @@ that you don't fully trust.
 ## Usage
 
 ```sh
-sandbox.sh [-i|--interactive] [-w|--workdir DIR]... [-b|--bind DIR]... [-r|--bind-ro DIR]... [-d|--chdir DIR] [-H|--home DIR] [-a|--app-home] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] /usr/bin/someapp [args...]
+sandbox.sh [-i|--interactive] [-w|--workdir DIR]... [-b|--bind DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-H|--home DIR] [-a|--app-home] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] /usr/bin/someapp [args...]
 ```
 
 - `-i`, `--interactive` — drop `--new-session` so an interactive shell inside
@@ -58,7 +58,7 @@ sandbox.sh [-i|--interactive] [-w|--workdir DIR]... [-b|--bind DIR]... [-r|--bin
   keeps working (same for `-b`/`-r`).
 - `-b DIR`, `--bind DIR` — like `-w`, but without changing the start
   directory; repeatable.
-- `-r DIR`, `--bind-ro DIR` — like `-b`, but read-only; repeatable.
+- `-r DIR`, `--ro-bind DIR` — like `-b`, but read-only; repeatable.
 - `-d DIR`, `--chdir DIR` — start the app in DIR, overriding `-w`'s chdir.
 - `-H DIR`, `--home DIR` — use DIR as the sandbox home (created if missing).
   Overrides `-a`.
