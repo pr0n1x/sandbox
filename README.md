@@ -22,6 +22,7 @@ that you don't fully trust.
   `/tmp` is a fresh tmpfs.
 - **Wayland GUI, GPU and sound**: the Wayland socket, `/dev/dri` and
   PipeWire/PulseAudio sockets are passed through. D-Bus is deliberately not.
+  The webcam is not either, unless granted with `-p camera`.
 - **System appearance**: the host's theme configs (`~/.config/kdeglobals`,
   GTK `settings.ini`, `qt5ct`/`qt6ct`, `~/.themes`, `~/.icons`, and the
   dconf database `~/.config/dconf/user`) are bound read-only into the box
@@ -42,7 +43,7 @@ that you don't fully trust.
 ## Usage
 
 ```sh
-sandbox.sh [-i|--interactive] [-w|--workdir DIR]... [-b|--bind DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-H|--home DIR] [-a|--app-home] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] /usr/bin/someapp [args...]
+sandbox.sh [-i|--interactive] [-w|--workdir DIR]... [-b|--bind DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-H|--home DIR] [-a|--app-home] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] [-p|--permissions LIST]... /usr/bin/someapp [args...]
 ```
 
 - `-i`, `--interactive` — drop `--new-session` so an interactive shell inside
@@ -101,6 +102,15 @@ sandbox.sh [-i|--interactive] [-w|--workdir DIR]... [-b|--bind DIR]... [-r|--ro-
   route — the sandbox gets the physical uplink while the host stays on the
   VPN. Caveat: DNS is forwarded to the host resolver (systemd-resolved),
   whose own upstream queries still follow host routing.
+- `-p LIST`, `--permissions LIST` — grant the app extra access to host
+  resources that are withheld by default; comma-separated, repeatable
+  (`-p camera` or `-p camera,foo`). Unknown names are rejected. Known
+  permissions:
+  - `camera` — the webcam(s): every `/dev/video*` (V4L2) and `/dev/media*`
+    node is bound into the sandbox's otherwise minimal `/dev`. Without the
+    D-Bus session bus there is no camera portal, so apps must use V4L2
+    directly (Firefox and Chromium do).
+  - `x11` — same as `-x`.
 
 The app name is resolved with `which`, so `sandbox.sh ping` and
 `sandbox.sh /usr/bin/ping` run the same binary and (with `-a`) use the same

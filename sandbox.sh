@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -eu
 
-usage() { echo "usage: sandbox.sh [-i|--interactive] [-w|--workdir DIR]... [-b|--bind DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-H|--home DIR] [-a|--app-home] [-n|--net[IFACE]] [-6|--ipv6] /usr/bin/someapp [args...]" >&2; exit 2; }
+usage() { echo "usage: sandbox.sh [-i|--interactive] [-w|--workdir DIR]... [-b|--bind DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-H|--home DIR] [-a|--app-home] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] [-p|--permissions LIST]... /usr/bin/someapp [args...]" >&2; exit 2; }
 
 help() {
   cat <<EOF
@@ -30,13 +30,18 @@ options:
   -x, --x11           pass the X11 socket and auth cookie through, for
                       X11-only apps (weakens isolation: X clients can snoop
                       each other)
+  -p, --permissions LIST
+                      grant extra access to host resources, comma-separated;
+                      repeatable. Known permissions:
+                        camera   the webcam(s): /dev/video* and /dev/media*
+                        x11      same as -x
   -h, --help          show this help
 EOF
   exit 0
 }
 
 # '+' stops parsing at the first non-option, so the app's own flags pass through untouched
-OPTS=$(getopt -o +iw:b:r:d:hH:an::6x -l help,interactive,workdir:,bind:,ro-bind:,chdir:,home:,app-home,net::,ipv6,x11 -n sandbox.sh -- "$@") || usage
+OPTS=$(getopt -o +iw:b:r:d:hH:an::6xp: -l help,interactive,workdir:,bind:,ro-bind:,chdir:,home:,app-home,net::,ipv6,x11,permissions: -n sandbox.sh -- "$@") || usage
 eval set -- "$OPTS"
 
 # -w/-b/-r DIR: bind DIR's real path ($1: --bind/--ro-bind); a symlink DIR is
@@ -61,6 +66,7 @@ PASTA_IP=(-4)                 # -6: also enable IPv6 in the sandbox network; def
 IPV6=""
 OUT_IF=""                     # -nIFACE: mirror IFACE inside and pin pasta's sockets to it
 X11=""                        # -x: pass the X11 socket through (weakens isolation)
+CAMERA=""                     # -p camera: pass /dev/video* (V4L2 webcams) through
 DNS_FWD=169.254.1.1
 FWD_ARGS=(--dns-forward "$DNS_FWD")
 while true; do
@@ -75,6 +81,18 @@ while true; do
     -a|--app-home) APP_HOME=1; shift ;;
     -6|--ipv6) PASTA_IP=(); IPV6=1; shift ;;
     -x|--x11) X11=1; shift ;;
+    # -p NAME[,NAME...]: named grants of host resources, so new ones don't
+    # each need an option letter
+    -p|--permissions)
+      IFS=, read -ra PERMS <<<"$2"
+      for PERM in "${PERMS[@]}"; do
+        case "$PERM" in
+          camera) CAMERA=1 ;;
+          x11) X11=1 ;;
+          '') ;;
+          *) echo "sandbox.sh: unknown permission: $PERM (known: camera, x11)" >&2; exit 2 ;;
+        esac
+      done; shift 2 ;;
     # the optional IFACE must be attached: -nIFACE / --net=IFACE
     -n|--net) NET=1; OUT_IF="$2"; shift 2 ;;
     --) shift; break ;;
@@ -101,6 +119,15 @@ if [ -n "$X11" ]; then
   X11_ARGS=(--ro-bind "$XSOCK" "$XSOCK" --setenv DISPLAY ":$DISP")
   # the X server wants the auth cookie; keep its env path valid inside
   [ -z "${XAUTHORITY:-}" ] || X11_ARGS+=(--ro-bind "$XAUTHORITY" "$XAUTHORITY" --setenv XAUTHORITY "$XAUTHORITY")
+fi
+# -p camera: --dev gives a minimal /dev with no video nodes, so bind each V4L2
+# device (and the media controller nodes some drivers pair with them) into it
+CAMERA_ARGS=()
+if [ -n "$CAMERA" ]; then
+  for DEV in /dev/video* /dev/media*; do
+    [ -c "$DEV" ] && CAMERA_ARGS+=(--dev-bind "$DEV" "$DEV")
+  done
+  [ ${#CAMERA_ARGS[@]} -gt 0 ] || echo "sandbox.sh: -p camera: no /dev/video* devices found" >&2
 fi
 OUT_ARGS=()
 if [ -n "$OUT_IF" ]; then
@@ -216,6 +243,7 @@ BWRAP_ARGS=(
   --proc /proc
   --dev /dev
   --dev-bind /dev/dri /dev/dri
+  "${CAMERA_ARGS[@]}"
   --ro-bind /sys /sys
   --tmpfs /tmp
   "${X11_ARGS[@]}"
