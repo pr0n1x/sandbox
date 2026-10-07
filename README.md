@@ -21,14 +21,15 @@ that you don't fully trust.
   - `home/<user>` (the real home path under the box, e.g.
     `~/sandboxes/default/home/user`) is bind-mounted as the app's `$HOME`;
     the real home directory is invisible.
-  - `usr/`, `etc/`, `opt/`, `var/` hold the app's changes to the system
-    when run with `-l` (see below). (`.work/` is the overlay's scratch
+  - `usr/`, `etc/`, `opt/`, `var/` hold the app's changes to the system,
+    once a `--root` run created them (see below). (`.work/` is the overlay's scratch
     space, `.mnt/` where the layered views are mounted while a sandbox runs:
     `.mnt/user/` the plain view, `.mnt/root/` the `--root` one.)
 - **Read-only system**: `/usr`, `/etc`, `/opt`, `/sys` are bound read-only;
-  `/tmp` is a fresh tmpfs. With `-l` the first three (and `/var`) become
-  writable fuse-overlayfs layers instead: the app can change "the system",
-  but the changes land in the box and the host stays untouched.
+  `/tmp` is a fresh tmpfs. A box that has a system layer (created by a
+  `--root` run, see below) gets fuse-overlayfs layers over the first three
+  and `/var` instead: installed software appears as part of the system,
+  changes land in the box and the host stays untouched.
 - **Wayland GUI, GPU and sound**: the Wayland socket, `/dev/dri` and
   PipeWire/PulseAudio sockets are passed through. D-Bus is deliberately not.
   The webcam is not either, unless granted with `-p camera`.
@@ -52,7 +53,8 @@ that you don't fully trust.
 ## Usage
 
 ```sh
-sandbox.sh [-i|--interactive] [-w|--bind DIR]... [-W|--workdir DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-b|--box NAME|DIR] [-a|--app-box] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] [-p|--permissions LIST]... [-l|--layer] [--root] /usr/bin/someapp [args...]
+sandbox.sh [-i|--interactive] [-w|--bind DIR]... [-W|--workdir DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-b|--box NAME|DIR] [-a|--app-box] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] [-p|--permissions LIST]... [--root] /usr/bin/someapp [args...]
+sandbox.sh [-b NAME|DIR] --reset-system
 sandbox.sh [options] --install PKG.deb... [dpkg options]
 ```
 
@@ -121,13 +123,15 @@ sandbox.sh [options] --install PKG.deb... [dpkg options]
     D-Bus session bus there is no camera portal, so apps must use V4L2
     directly (Firefox and Chromium do).
   - `x11` — same as `-x`.
-- `-l`, `--layer` — writable system through a persistent layer: `/usr`,
-  `/etc`, `/opt` and `/var` (which is otherwise absent) are mounted with
-  [fuse-overlayfs](https://github.com/containers/fuse-overlayfs), the host
-  dirs as the read-only lower layer and the box's `usr/`, `etc/`, `opt/`,
-  `var/` as the writable upper layer. Changes the app makes to the system
-  land in the box and never reach the host; the box holds exactly the diff,
-  and wiping those dirs resets the system. The mounts are made on the host
+- **The system layer** (no option: a box has one once `usr/`, `etc/`,
+  `opt/` or `var/` exist in it, which a `--root` run creates; every start
+  of that box then uses it, and `--reset-system` removes it) —
+  `/usr`, `/etc`, `/opt` and `/var` (which is otherwise absent) are mounted
+  with [fuse-overlayfs](https://github.com/containers/fuse-overlayfs), the
+  host dirs as the read-only lower layer and the box's `usr/`, `etc/`,
+  `opt/`, `var/` as the writable upper layer. Changes made to the system
+  land in the box and never reach the host; the box holds exactly the diff.
+  The mounts are made on the host
   side, by you, through the setuid `fusermount3` like any sshfs — under
   `<box>/.mnt/` — and bound into the sandbox, so nothing inside needs a
   capability and Ubuntu's stock bwrap profile stays untouched. A sandbox
@@ -158,7 +162,8 @@ sandbox.sh [options] --install PKG.deb... [dpkg options]
 - `--root` — run the app as root inside the sandbox: uid 0 there is your
   own uid outside, so it grants no host privileges, and files it creates
   are yours on disk. For installers and other `id -u`-checking tools.
-  Implies `-l`, and the layers are then mounted with `squash_to_uid`: every
+  Creates the box's system layer if it has none, mounted with
+  `squash_to_uid`: every
   system file reports your uid, which the sandbox shows as root, so an
   installer can edit, replace, hard-link and chown-to-root anything it can
   read — `dpkg -i`, `apt-get install ./pkg.deb`, vendor `install.sh`
@@ -183,6 +188,11 @@ sandbox.sh [options] --install PKG.deb... [dpkg options]
   when a postinst calls it) run without it. No short option on purpose.
   Under `-n` the app is normally un-rooted after pasta's root mapping;
   `--root` keeps the root.
+- `--reset-system` — reset the box's system to the host's, keeping its
+  home: removes the system layer, i.e. `usr/`, `etc/`, `opt/`, `var/` and
+  the overlay's `.work/` and `.mnt/`. The box then sees the host's system
+  again, until the next `--root` run. Refused while a sandbox has the box's
+  layers mounted. Takes no app: `sandbox -b mybox --reset-system`.
 
 The app name is resolved with `which`, so `sandbox.sh ping` and
 `sandbox.sh /usr/bin/ping` run the same binary and (with `-a`) use the same
@@ -194,7 +204,8 @@ box.
 - `passt` (`apt install passt`) — only for `-n`/`--net`. No AppArmor setup
   needed: pasta only attaches to the netns bwrap already created, and joining
   an existing namespace isn't gated by the Ubuntu userns restriction.
-- `fuse-overlayfs` (`apt install fuse-overlayfs`) — only for `-l`/`--root`.
+- `fuse-overlayfs` (`apt install fuse-overlayfs`) — only for boxes with a
+  system layer, i.e. `--root` and everything after it.
 - a C compiler and `make` to build `rootshim.so` — only for `--root`.
 - On Ubuntu 24.04+ unprivileged user namespaces are restricted by AppArmor.
   The `apparmor` package ships `/etc/apparmor.d/bwrap-userns-restrict`,
@@ -216,11 +227,11 @@ box.
   as ambient capabilities — they apply only inside the sandbox's own
   namespaces. Note that without `-n`'s root mapping, Ubuntu's userns
   hardening still blocks some uses of them (e.g. raw sockets).
-- A persistent writable `/usr` (`-l`) means a compromised app can plant
+- A persistent writable `/usr` (a box with a system layer) means a compromised app can plant
   binaries that run on its next start: the layer is part of the sandbox's
   trust domain, like the home. Files under `<box>/usr` etc. carry
   `user.containers.override_stat` xattrs (recorded owner and mode, see
-  `-l`) and possibly fuse-overlayfs whiteout markers; `ls -l` shows them as
+  the system layer) and possibly fuse-overlayfs whiteout markers; `ls -l` shows them as
   a `+`. Edit the box from outside only while no sandbox has it mounted;
   files you drop in become root's in the plain view at the next start.
 - `ping` under `-n` sends packets (via the mirrored `CAP_NET_RAW`), but

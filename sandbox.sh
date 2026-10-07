@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
 set -eu
 
-usage() { echo "usage: sandbox.sh [-i|--interactive] [-w|--bind DIR]... [-W|--workdir DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-b|--box NAME|DIR] [-a|--app-box] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] [-p|--permissions LIST]... [-l|--layer] [--root] /usr/bin/someapp [args...]" >&2; exit 2; }
+usage() { echo "usage: sandbox.sh [-i|--interactive] [-w|--bind DIR]... [-W|--workdir DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-b|--box NAME|DIR] [-a|--app-box] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] [-p|--permissions LIST]... [--root] /usr/bin/someapp [args...]\n       sandbox.sh [-b NAME|DIR] --reset-system" >&2; exit 2; }
 
 help() {
   cat <<EOF
 usage: sandbox.sh [options] /usr/bin/someapp [args...]
+       sandbox.sh [-b NAME|DIR] --reset-system
 
 Run an app inside strict bubblewrap isolation: own namespaces, no network,
 read-only system, a private home, Wayland/GPU/sound passed through.
 Everything the app keeps lives in its box, ~/sandboxes/<name>/, laid out
 like the root filesystem:
   home/$USER              bound as \$HOME
-  usr/ etc/ opt/ var/     with -l: the app's changes to the system
-                          (fuse-overlayfs layers over the host's dirs)
+  usr/ etc/ opt/ var/     the app's changes to the system, once a --root
+                          run created them (fuse-overlayfs layers over
+                          the host's dirs; a box without them sees the
+                          host's system read-only)
 See README.md for details.
 
 options:
@@ -41,22 +44,24 @@ options:
                       repeatable. Known permissions:
                         camera   the webcam(s): /dev/video* and /dev/media*
                         x11      same as -x
-  -l, --layer         writable system: /usr, /etc, /opt and /var become
-                      fuse-overlayfs layers whose changes persist in the box
-                      (usr/, etc/, opt/, var/) and never reach the host
   --root              run as root inside: uid 0 in the sandbox is your own
                       uid outside, so it grants no host privileges; files it
-                      creates are yours. The layer then shows every system
-                      file as root's, so installers can change anything
-                      readable. Implies -l; e.g. 'sandbox --root -b mybox
-                      dpkg -i x.deb'
+                      creates are yours. Gives the box a system layer (/usr,
+                      /etc, /opt, /var writable, changes kept in the box,
+                      never reaching the host) that shows every system file
+                      as root's, so installers can change anything readable;
+                      e.g. 'sandbox --root -b mybox dpkg -i x.deb'
+  --reset-system      reset the box's system to the host's, keeping its
+                      home: removes the system layer (usr/ etc/ opt/ var/
+                      and the overlay's scratch dirs). Refused while a
+                      sandbox has the box mounted
   -h, --help          show this help
 EOF
   exit 0
 }
 
 # '+' stops parsing at the first non-option, so the app's own flags pass through untouched
-OPTS=$(getopt -o +iw:W:r:d:hb:an::6xp:l -l help,interactive,bind:,workdir:,ro-bind:,chdir:,box:,app-box,net::,ipv6,x11,permissions:,layer,root -n sandbox.sh -- "$@") || usage
+OPTS=$(getopt -o +iw:W:r:d:hb:an::6xp: -l help,interactive,bind:,workdir:,ro-bind:,chdir:,box:,app-box,net::,ipv6,x11,permissions:,root,reset-system -n sandbox.sh -- "$@") || usage
 eval set -- "$OPTS"
 
 # -w/-W/-r DIR: bind DIR's real path ($1: --bind/--ro-bind); a symlink DIR is
@@ -82,8 +87,9 @@ IPV6=""
 OUT_IF=""                     # -nIFACE: mirror IFACE inside and pin pasta's sockets to it
 X11=""                        # -x: pass the X11 socket through (weakens isolation)
 CAMERA=""                     # -p camera: pass /dev/video* (V4L2 webcams) through
-LAYER=""                      # -l: fuse-overlayfs over /usr, /etc, /opt, /var; writes persist in the box
+LAYER=""                      # set below if the box has a system layer (or --root creates one)
 ROOT=""                       # --root: uid 0 inside (mapped to the real uid), no un-rooting
+CLEAR=""                      # --reset-system: drop the box's system layer, keep its home
 DNS_FWD=169.254.1.1
 FWD_ARGS=(--dns-forward "$DNS_FWD")
 while true; do
@@ -112,18 +118,12 @@ while true; do
       done; shift 2 ;;
     # the optional IFACE must be attached: -nIFACE / --net=IFACE
     -n|--net) NET=1; OUT_IF="$2"; shift 2 ;;
-    -l|--layer) LAYER=1; shift ;;
     --root) ROOT=1; shift ;;
+    --reset-system) CLEAR=1; shift ;;
     --) shift; break ;;
   esac
 done
 CD="${CD:-$WD}"
-# root without a writable system is pointless (and would surprise an
-# installer), so --root implies -l
-if [ -n "$ROOT" ] && [ -z "$LAYER" ]; then
-  echo "sandbox.sh: --root implies -l/--layer: the system is writable through the box" >&2
-  LAYER=1
-fi
 [ -z "$CD" ] || BIND_ARGS+=(--chdir "$CD")
 
 # --root, or -n: map the real uid to 0 inside. With -n it's required: pasta can
@@ -188,11 +188,14 @@ if [ -n "$OUT_IF" ]; then
   fi
 fi
 
-[ $# -ge 1 ] || usage
-APP_NAME="$1"; shift
-APP="$(which "$APP_NAME" || true)"   # unlike `command -v`, always a disk file, even for builtin names
-[ -n "$APP" ] || { echo "sandbox.sh: app not found: $APP_NAME" >&2; exit 1; }
-case "$APP" in /*) ;; *) APP="$(realpath -e "$APP")" ;; esac   # e.g. ./local-app
+[ $# -ge 1 ] || [ -n "$CLEAR" ] || usage
+APP=""
+if [ $# -ge 1 ]; then   # (--reset-system alone has no app to run)
+  APP_NAME="$1"; shift
+  APP="$(which "$APP_NAME" || true)"   # unlike `command -v`, always a disk file, even for builtin names
+  [ -n "$APP" ] || { echo "sandbox.sh: app not found: $APP_NAME" >&2; exit 1; }
+  case "$APP" in /*) ;; *) APP="$(realpath -e "$APP")" ;; esac   # e.g. ./local-app
+fi
 
 # a snap's binary run directly (realpath /snap/foo/current/...): expose /snap
 # and forbid nested user namespaces. Snap builds never run their own userns
@@ -245,20 +248,37 @@ if [[ "$CAPS" == cap_* ]]; then
 fi
 
 # the box holds everything the app keeps, laid out like /: <box>$HOME is
-# bound as the sandbox $HOME, <box>/usr etc. take the -l system writes.
+# bound as the sandbox $HOME, <box>/usr etc. take the system writes.
 # -b: a bare NAME is a box under ~/sandboxes, anything with a slash is a
 # directory; -a: per-app box named after the binary's path with dashes for
 # slashes (/usr/bin/foo -> usr-bin-foo); default: the shared box
 # ~/sandboxes/default
 if [ -z "$BOX" ]; then
-  if [ -n "$APP_BOX" ]; then APP_SLUG="${APP#/}"; BOX="$HOME/sandboxes/${APP_SLUG//\//-}"; else BOX="$HOME/sandboxes/default"; fi
+  if [ -n "$APP_BOX" ]; then
+    [ -n "$APP" ] || { echo "sandbox.sh: -a needs an app to name the box after" >&2; exit 2; }
+    APP_SLUG="${APP#/}"; BOX="$HOME/sandboxes/${APP_SLUG//\//-}"
+  else BOX="$HOME/sandboxes/default"; fi
 elif [[ "$BOX" != */* ]]; then BOX="$HOME/sandboxes/$BOX"
 else BOX="$(realpath -m "$BOX")"
 fi
 BOX_HOME="$BOX$HOME"
 mkdir -p "$BOX_HOME"
 
-# -l: the system dirs become fuse-overlayfs mounts — host dir as the read-only
+# --reset-system: back to the host's system, home untouched. Not while the
+# layers are mounted (a sandbox is running on the box): the daemons would
+# keep serving from directories we pulled away under them
+if [ -n "$CLEAR" ]; then
+  ! grep -q " $BOX/.mnt/" /proc/mounts ||
+    { echo "sandbox.sh: $BOX is in use (its layers are mounted); stop its sandboxes first" >&2; exit 1; }
+  chmod -R u+rwX "$BOX/.work" 2>/dev/null || true   # overlay scratch dirs can be mode 000
+  rm -rf "$BOX"/{usr,etc,opt,var,.work,.mnt}
+  echo "sandbox.sh: system of $BOX reset to the host's; its home is untouched" >&2
+  [ -n "$APP" ] || exit 0
+fi
+
+# A box has a system layer once a --root run created it (<box>/usr etc.
+# exist); every start of that box then uses it, nothing to remember on the
+# launcher. The system dirs become fuse-overlayfs mounts — host dir as the read-only
 # lower layer, <box>/DIR as the writable upper, scratch space in <box>/.work —
 # so the app sees a writable system while the host never changes. The mounts
 # are made here on the host side, by this user through the setuid
@@ -308,7 +328,7 @@ mark_root() {
   find "$BOX/usr" "$BOX/etc" "$BOX/opt" "$BOX/var" \( -type f -o -type d \) "${NEWER[@]}" -print0 2>/dev/null |
     while IFS= read -r -d '' F; do
       getfattr -n "$OWNER_XATTR" --only-values -- "$F" >/dev/null 2>&1 ||
-        setfattr -n "$OWNER_XATTR" -v "0:0:$(printf '%o' "0x$(stat -c %f -- "$F")")" -- "$F" || true
+        setfattr -n "$OWNER_XATTR" -v "0:0:$(printf '%o' "0x$(stat -c %f -- "$F")")" -- "$F" 2>/dev/null || true
     done
   : > "$STAMP"
 }
@@ -329,9 +349,12 @@ layer() {
   fi
   LAYER_ARGS+=(--bind "$MNT" "$DIR")
 }
+for DIR in usr etc opt var; do [ ! -d "$BOX/$DIR" ] || LAYER=1; done
+[ -z "$ROOT" ] || LAYER=1
 if [ -n "$LAYER" ]; then
-  command -v fuse-overlayfs >/dev/null || { echo "sandbox.sh: -l needs fuse-overlayfs (apt install fuse-overlayfs)" >&2; exit 1; }
-  # /var only exists in the sandbox with -l: package managers need it.
+  command -v fuse-overlayfs >/dev/null ||
+    { echo "sandbox.sh: this box has a system layer, which needs fuse-overlayfs (apt install fuse-overlayfs)" >&2; exit 1; }
+  # /var only exists in the sandbox with a layer: package managers need it.
   # dpkg's and apt's lock files are root-only on the host, so they can't be
   # copied up to be opened for writing; shadow them with empty box files
   for F in var/lib/dpkg/lock var/lib/dpkg/lock-frontend var/lib/dpkg/triggers/Lock var/lib/apt/lists/lock var/cache/apt/archives/lock; do
@@ -347,8 +370,12 @@ SHIM_ARGS=()
 SHIM=""
 if [ -n "$ROOT" ]; then
   SHIM="$(dirname "$(realpath "${BASH_SOURCE[0]}")")/rootshim.so"
-  if [ -f "$SHIM" ]
-  then SHIM_ARGS=(--ro-bind "$SHIM" /run/sandbox/rootshim.so)
+  if [ -f "$SHIM" ]; then
+    # bound inside /usr (a path AppArmor lets every program read libraries
+    # from); the mountpoint file is created here with a normal mode, so the
+    # empty file it leaves in the box can be labeled like the rest
+    mkdir -p "$BOX/usr/lib"; [ -e "$BOX/usr/lib/sandbox-rootshim.so" ] || : > "$BOX/usr/lib/sandbox-rootshim.so"
+    SHIM_ARGS=(--ro-bind "$SHIM" /usr/lib/sandbox-rootshim.so)
   else echo "sandbox.sh: --root without rootshim.so (run make in ${SHIM%/*}): installers that create mode-000 dirs, like dpkg, will fail" >&2; SHIM=""
   fi
 fi
@@ -404,7 +431,7 @@ PRELOAD=""
 for LIB in ${LD_PRELOAD:+${LD_PRELOAD//:/ }}; do
   case "$LIB" in *nocsd*) ;; *) PRELOAD="$PRELOAD:$LIB" ;; esac
 done
-[ -z "$SHIM" ] || PRELOAD=":/run/sandbox/rootshim.so$PRELOAD"
+[ -z "$SHIM" ] || PRELOAD=":/usr/lib/sandbox-rootshim.so$PRELOAD"
 if [ -n "${PRELOAD#:}" ]
 then BWRAP_ARGS+=(--setenv LD_PRELOAD "${PRELOAD#:}")
 elif [ -n "${LD_PRELOAD:-}" ]
