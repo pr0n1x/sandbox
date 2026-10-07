@@ -21,12 +21,14 @@ that you don't fully trust.
   - `home/<user>` (the real home path under the box, e.g.
     `~/sandboxes/default/home/user`) is bind-mounted as the app's `$HOME`;
     the real home directory is invisible.
-  - `usr/`, `etc/`, `opt/` hold the app's changes to the system when run
-    with `-l` (see below). (`.work/` is overlayfs' scratch space.)
+  - `usr/`, `etc/`, `opt/`, `var/` hold the app's changes to the system
+    when run with `-l` (see below). (`.work/` is the overlay's scratch
+    space, `.mnt/` where the layered views are mounted while a sandbox runs:
+    `.mnt/user/` the plain view, `.mnt/root/` the `--root` one.)
 - **Read-only system**: `/usr`, `/etc`, `/opt`, `/sys` are bound read-only;
-  `/tmp` is a fresh tmpfs. With `-l` the first three become writable
-  overlays instead: the app can change "the system", but the changes land in
-  the box and the host stays untouched.
+  `/tmp` is a fresh tmpfs. With `-l` the first three (and `/var`) become
+  writable fuse-overlayfs layers instead: the app can change "the system",
+  but the changes land in the box and the host stays untouched.
 - **Wayland GUI, GPU and sound**: the Wayland socket, `/dev/dri` and
   PipeWire/PulseAudio sockets are passed through. D-Bus is deliberately not.
   The webcam is not either, unless granted with `-p camera`.
@@ -50,7 +52,8 @@ that you don't fully trust.
 ## Usage
 
 ```sh
-sandbox.sh [-i|--interactive] [-w|--bind DIR]... [-W|--workdir DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-b|--box NAME|DIR] [-a|--app-box] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] [-p|--permissions LIST]... [-l|--layer] /usr/bin/someapp [args...]
+sandbox.sh [-i|--interactive] [-w|--bind DIR]... [-W|--workdir DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-b|--box NAME|DIR] [-a|--app-box] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] [-p|--permissions LIST]... [-l|--layer] [--root] /usr/bin/someapp [args...]
+sandbox.sh [options] --install PKG.deb... [dpkg options]
 ```
 
 - `-i`, `--interactive` — drop `--new-session` so an interactive shell inside
@@ -119,13 +122,67 @@ sandbox.sh [-i|--interactive] [-w|--bind DIR]... [-W|--workdir DIR]... [-r|--ro-
     directly (Firefox and Chromium do).
   - `x11` — same as `-x`.
 - `-l`, `--layer` — writable system through a persistent layer: `/usr`,
-  `/etc` and `/opt` are mounted as overlayfs with the host dirs as the
-  read-only lower layer and the box's `usr/`, `etc/`, `opt/` as the
-  writable upper layer. The app sees a normal writable system — under `-n`
-  it is even (fake) root, so e.g. `dpkg -i`-style installs into `/usr` and
-  `/etc` edits work — while the host never changes; the box holds exactly
-  the diff, and wiping those dirs resets the system. Needs bubblewrap ≥ 0.9
-  (`--overlay`) and unprivileged overlayfs (Linux ≥ 5.11).
+  `/etc`, `/opt` and `/var` (which is otherwise absent) are mounted with
+  [fuse-overlayfs](https://github.com/containers/fuse-overlayfs), the host
+  dirs as the read-only lower layer and the box's `usr/`, `etc/`, `opt/`,
+  `var/` as the writable upper layer. Changes the app makes to the system
+  land in the box and never reach the host; the box holds exactly the diff,
+  and wiping those dirs resets the system. The mounts are made on the host
+  side, by you, through the setuid `fusermount3` like any sshfs — under
+  `<box>/.mnt/` — and bound into the sandbox, so nothing inside needs a
+  capability and Ubuntu's stock bwrap profile stays untouched. A sandbox
+  started while another one already has the box's layers mounted in the
+  same mode (plain or `--root`) reuses them; the mounts go away (lazily)
+  when the sandbox that made them exits. A `--root` sandbox next to a
+  running plain one gets its own mounts over the same box: fine for an
+  install, but the running app sees the result only after a restart.
+  Without `--root` the app sees the system as on the host: root's files —
+  the host's and those installed into the box under `--root` — are
+  read-only; the app can create files where a normal user could (its home,
+  world-writable dirs) and keeps full access to what it created itself.
+  Inside the sandbox root and you are the same uid, so this needs
+  bookkeeping. Both views are mounted with fuse-overlayfs'
+  `xattr_permissions`: the owner and mode an app sets are recorded in an
+  xattr and reported from it, while the real file stays readable to the
+  daemon (which has no capabilities; a real mode-000 file, as dpkg creates
+  its temp files, would otherwise break every lookup in its directory). The
+  record is `user.containers.override_stat`. Only the plain view records
+  (the `--root` view can't use that mode: it would make the daemon deny
+  fake root wherever no record says otherwise), so what `--root` runs
+  install, like what is dropped into the box from outside, carries no
+  record — and before a plain view is mounted, sandbox.sh labels
+  everything unrecorded root's (`0:0`, real mode kept). What the app
+  creates gets a record of its own and stays the app's. A `--root` run
+  concurrent with a plain one is seen by the running app as the app's own
+  files until the app's next start. Needs the `fuse-overlayfs` package.
+- `--root` — run the app as root inside the sandbox: uid 0 there is your
+  own uid outside, so it grants no host privileges, and files it creates
+  are yours on disk. For installers and other `id -u`-checking tools.
+  Implies `-l`, and the layers are then mounted with `squash_to_uid`: every
+  system file reports your uid, which the sandbox shows as root, so an
+  installer can edit, replace, hard-link and chown-to-root anything it can
+  read — `dpkg -i`, `apt-get install ./pkg.deb`, vendor `install.sh`
+  scripts work, maintainer scripts included, and `/var/lib/dpkg` is the
+  host's database with the box's changes layered on top. Limits: host files
+  only root can read (`/etc/shadow`, other users' data) stay unreadable and
+  so can't be copied up or replaced — nothing unprivileged can change that;
+  and `chown` to any uid but your own fails with EINVAL, since the sandbox
+  maps a single uid (packages shipping files owned by `_apt`, `man` etc.
+  need `--force-...`-style workarounds or a fix-up). dpkg's and apt's lock
+  files are root-only on the host, so the box gets empty shadows of them.
+  Anything a package installs shadows the host's version from then on, host
+  upgrades included (e.g. `ld.so.cache` after a postinst runs `ldconfig`).
+  `--root` runs preload `rootshim.so` (build it once with `make`; without
+  it `--root` warns): neither fake root nor the FUSE daemon has
+  capabilities, so a directory created with mode 000 — dpkg does that for
+  every directory, chmodding later — can't be opened by the daemon to
+  finish the mkdir; the shim keeps the owner's bits in every mode an
+  installer sets (`rwx` on directories, `rw` on files; see `rootshim.c`).
+  Statically linked programs and ones AppArmor confines separately (Ubuntu
+  ships a profile for `who`, which prints a harmless "cannot be preloaded"
+  when a postinst calls it) run without it. No short option on purpose.
+  Under `-n` the app is normally un-rooted after pasta's root mapping;
+  `--root` keeps the root.
 
 The app name is resolved with `which`, so `sandbox.sh ping` and
 `sandbox.sh /usr/bin/ping` run the same binary and (with `-a`) use the same
@@ -137,21 +194,16 @@ box.
 - `passt` (`apt install passt`) — only for `-n`/`--net`. No AppArmor setup
   needed: pasta only attaches to the netns bwrap already created, and joining
   an existing namespace isn't gated by the Ubuntu userns restriction.
-- On Ubuntu 24.04+ unprivileged user namespaces are restricted by AppArmor;
-  bwrap needs a profile allowing them:
-
-  ```sh
-  sudo tee /etc/apparmor.d/bwrap <<'EOF'
-  abi <abi/4.0>,
-  include <tunables/global>
-
-  profile bwrap /usr/bin/bwrap flags=(unconfined) {
-    userns,
-    include if exists <local/bwrap>
-  }
-  EOF
-  sudo apparmor_parser -r /etc/apparmor.d/bwrap
-  ```
+- `fuse-overlayfs` (`apt install fuse-overlayfs`) — only for `-l`/`--root`.
+- a C compiler and `make` to build `rootshim.so` — only for `--root`.
+- On Ubuntu 24.04+ unprivileged user namespaces are restricted by AppArmor.
+  The `apparmor` package ships `/etc/apparmor.d/bwrap-userns-restrict`,
+  which lets bwrap create them and confines everything it starts to a
+  profile with no capabilities at all. The sandbox is designed to live with
+  that: nothing inside ever needs a capability (the layer mounts are made
+  on the host side). Don't add an unconfined `bwrap` profile of your own —
+  a profile of the same name is loaded alphabetically after yours anyway,
+  so it would silently lose.
 
 ## Notes
 
@@ -164,15 +216,13 @@ box.
   as ambient capabilities — they apply only inside the sandbox's own
   namespaces. Note that without `-n`'s root mapping, Ubuntu's userns
   hardening still blocks some uses of them (e.g. raw sockets).
-- `-l` layers are per directory; a lower dir with mounts beneath it can't be
-  layered (overlayfs refuses it), which is why `/var` is left out — snaps
-  bind-mount into it. Running two sandboxes on the same layer at once is
-  allowed, but the kernel warns that concurrent access to the same files from
-  both mounts is undefined behavior — fine for a second browser window that
-  hands off to the running instance and exits, not for two long-running apps
-  writing the same files. A persistent writable `/usr` also means a
-  compromised app can plant binaries that run on its next start: the layer
-  is part of the sandbox's trust domain, like the home.
+- A persistent writable `/usr` (`-l`) means a compromised app can plant
+  binaries that run on its next start: the layer is part of the sandbox's
+  trust domain, like the home. Files under `<box>/usr` etc. carry
+  `user.containers.override_stat` xattrs (recorded owner and mode, see
+  `-l`) and possibly fuse-overlayfs whiteout markers; `ls -l` shows them as
+  a `+`. Edit the box from outside only while no sandbox has it mounted;
+  files you drop in become root's in the plain view at the next start.
 - `ping` under `-n` sends packets (via the mirrored `CAP_NET_RAW`), but
   replies only come back if the host allows unprivileged ping sockets, which
   pasta uses to relay ICMP:

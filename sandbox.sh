@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -eu
 
-usage() { echo "usage: sandbox.sh [-i|--interactive] [-w|--bind DIR]... [-W|--workdir DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-b|--box NAME|DIR] [-a|--app-box] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] [-p|--permissions LIST]... [-l|--layer] /usr/bin/someapp [args...]" >&2; exit 2; }
+usage() { echo "usage: sandbox.sh [-i|--interactive] [-w|--bind DIR]... [-W|--workdir DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-b|--box NAME|DIR] [-a|--app-box] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] [-p|--permissions LIST]... [-l|--layer] [--root] /usr/bin/someapp [args...]" >&2; exit 2; }
 
 help() {
   cat <<EOF
@@ -12,7 +12,8 @@ read-only system, a private home, Wayland/GPU/sound passed through.
 Everything the app keeps lives in its box, ~/sandboxes/<name>/, laid out
 like the root filesystem:
   home/$USER              bound as \$HOME
-  usr/ etc/ opt/          with -l: the app's changes to /usr, /etc, /opt
+  usr/ etc/ opt/ var/     with -l: the app's changes to the system
+                          (fuse-overlayfs layers over the host's dirs)
 See README.md for details.
 
 options:
@@ -40,16 +41,22 @@ options:
                       repeatable. Known permissions:
                         camera   the webcam(s): /dev/video* and /dev/media*
                         x11      same as -x
-  -l, --layer         writable system: /usr, /etc and /opt become overlays
-                      whose changes persist in the box (usr/, etc/, opt/)
-                      and never reach the host
+  -l, --layer         writable system: /usr, /etc, /opt and /var become
+                      fuse-overlayfs layers whose changes persist in the box
+                      (usr/, etc/, opt/, var/) and never reach the host
+  --root              run as root inside: uid 0 in the sandbox is your own
+                      uid outside, so it grants no host privileges; files it
+                      creates are yours. The layer then shows every system
+                      file as root's, so installers can change anything
+                      readable. Implies -l; e.g. 'sandbox --root -b mybox
+                      dpkg -i x.deb'
   -h, --help          show this help
 EOF
   exit 0
 }
 
 # '+' stops parsing at the first non-option, so the app's own flags pass through untouched
-OPTS=$(getopt -o +iw:W:r:d:hb:an::6xp:l -l help,interactive,bind:,workdir:,ro-bind:,chdir:,box:,app-box,net::,ipv6,x11,permissions:,layer -n sandbox.sh -- "$@") || usage
+OPTS=$(getopt -o +iw:W:r:d:hb:an::6xp:l -l help,interactive,bind:,workdir:,ro-bind:,chdir:,box:,app-box,net::,ipv6,x11,permissions:,layer,root -n sandbox.sh -- "$@") || usage
 eval set -- "$OPTS"
 
 # -w/-W/-r DIR: bind DIR's real path ($1: --bind/--ro-bind); a symlink DIR is
@@ -75,7 +82,8 @@ IPV6=""
 OUT_IF=""                     # -nIFACE: mirror IFACE inside and pin pasta's sockets to it
 X11=""                        # -x: pass the X11 socket through (weakens isolation)
 CAMERA=""                     # -p camera: pass /dev/video* (V4L2 webcams) through
-LAYER=""                      # -l: overlay /usr, /etc, /opt; writes persist in the box's usr/ etc/ opt/
+LAYER=""                      # -l: fuse-overlayfs over /usr, /etc, /opt, /var; writes persist in the box
+ROOT=""                       # --root: uid 0 inside (mapped to the real uid), no un-rooting
 DNS_FWD=169.254.1.1
 FWD_ARGS=(--dns-forward "$DNS_FWD")
 while true; do
@@ -105,17 +113,24 @@ while true; do
     # the optional IFACE must be attached: -nIFACE / --net=IFACE
     -n|--net) NET=1; OUT_IF="$2"; shift 2 ;;
     -l|--layer) LAYER=1; shift ;;
+    --root) ROOT=1; shift ;;
     --) shift; break ;;
   esac
 done
 CD="${CD:-$WD}"
+# root without a writable system is pointless (and would surprise an
+# installer), so --root implies -l
+if [ -n "$ROOT" ] && [ -z "$LAYER" ]; then
+  echo "sandbox.sh: --root implies -l/--layer: the system is writable through the box" >&2
+  LAYER=1
+fi
 [ -z "$CD" ] || BIND_ARGS+=(--chdir "$CD")
 
+# --root, or -n: map the real uid to 0 inside. With -n it's required: pasta can
+# only gain caps in the sandbox userns if its uid maps to root there (its
+# self-hardening blocks the join otherwise) — like rootless podman/docker
+[ -z "$ROOT" ] && [ -z "$NET" ] || NET_ARGS=(--uid 0 --gid 0)
 if [ -n "$NET" ]; then
-  # --uid 0: pasta can only gain caps in the sandbox userns if its uid maps to
-  # root there (its self-hardening blocks the join otherwise), so with -n the
-  # app runs as (fake) root inside, like rootless podman/docker containers
-  NET_ARGS=(--uid 0 --gid 0)
   # bind at the symlink target (e.g. systemd-resolved's stub under /run),
   # creating its directory; must come after the /etc bind or it gets buried
   RESOLV="$(realpath -m /etc/resolv.conf)"
@@ -204,8 +219,9 @@ esac
 
 # -n maps the real uid to 0 (for pasta, see above), which would leave the app
 # running as root with every user-owned file shown as root:root. Undo that for
-# the app itself: nest a second userns mapping 0 back to the real uid/gid, so
-# ownership looks normal again (like podman unshare in reverse). Ubuntu's
+# the app itself unless --root asks for root: nest a second userns mapping 0 back
+# to the real uid/gid, so ownership looks normal again (like podman unshare in
+# reverse). Ubuntu's
 # userns restriction strips capabilities from the creator (the app can't
 # write its own uid_map), so the app just waits for the mapping while
 # sandbox.sh writes it from outside — joining/holding a userns isn't gated,
@@ -213,7 +229,7 @@ esac
 # forbidden. Raw-socket caps don't survive into the nested ns, but the ping
 # sysctl below still applies (gid 1000 inner = gid 0 outer, still in range)
 APP_WRAP=()
-[ -z "$NET" ] || [ -n "$SNAP" ] || APP_WRAP=(unshare -U sh -c
+[ -z "$NET" ] || [ -n "$SNAP" ] || [ -n "$ROOT" ] || APP_WRAP=(unshare -U sh -c
   'n=0; while [ "$(id -u)" = 65534 ]; do
      [ "$((n+=1))" -lt 100 ] || { echo "sandbox.sh: no uid map after 5s" >&2; exit 1; }
      sleep 0.05
@@ -242,25 +258,100 @@ fi
 BOX_HOME="$BOX$HOME"
 mkdir -p "$BOX_HOME"
 
-# -l: mount DIR as an overlay instead of a read-only bind, with the writable
-# upper layer at <box>/DIR (and overlayfs' scratch dir, which must be on the
-# same filesystem, at <box>/.work/DIR) — the app sees a writable system, the
-# host never changes. Sets the array named $1; $2 is the bind flag used
-# without -l
-sys_dir() {
-  local -n OUT="$1"; local DIR="$3"
-  if [ -z "$LAYER" ]; then OUT=("$2" "$DIR" "$DIR"); return; fi
-  [ -d "$DIR" ] || { OUT=(); return; }
-  # overlayfs can't use a lower dir with mounts beneath it (EINVAL, "failed to
-  # clone lowerpath") — e.g. /var, where snaps bind-mount things
-  local SUB; SUB="$(findmnt -rn -o TARGET | grep -m1 "^$DIR/" || true)"
-  [ -z "$SUB" ] || { echo "sandbox.sh: can't layer $DIR: $SUB is mounted under it" >&2; exit 1; }
-  mkdir -p "$BOX$DIR" "$BOX/.work$DIR"
-  OUT=(--overlay-src "$DIR" --overlay "$BOX$DIR" "$BOX/.work$DIR" "$DIR")
+# -l: the system dirs become fuse-overlayfs mounts — host dir as the read-only
+# lower layer, <box>/DIR as the writable upper, scratch space in <box>/.work —
+# so the app sees a writable system while the host never changes. The mounts
+# are made here on the host side, by this user through the setuid
+# fusermount3 like any sshfs, and bound into the sandbox: no capability is
+# needed inside, so Ubuntu's bwrap profile (which denies the children all
+# capabilities) stays as it is; kernel overlayfs would need the mount done by
+# bwrap and then can't write anything owned by an unmapped uid. --root adds
+# squash_to_uid: every file reports your uid, which the sandbox shows as
+# root, so an installer can edit, chown and replace whatever it can read
+# (root-only host files stay out of reach: nothing unprivileged reads them).
+# Both views use fuse-overlayfs' xattr_permissions: the mode an app asks
+# for is recorded in an xattr while the real file stays accessible to the
+# daemon — which has no capabilities, so a real mode-000 file (dpkg creates
+# its temp files that way) would be unreadable to it and break lookups in
+# its directory. The record also holds the owner, which is what gives the
+# plain view normal semantics: inside, root and you are the same uid, so
+# without bookkeeping a file an installer creates would look like the app's
+# own, writable. Only the plain view uses xattr_permissions (the --root
+# view can't: it would make the daemon deny fake root wherever no record
+# says otherwise), so what --root runs install, like what is dropped into
+# the box from outside, carries no record — and before the plain view is
+# mounted everything unrecorded is labeled root's (0:0, real mode kept).
+# Installed files are thus read-only system files for the app, like on the
+# host; what the app creates gets a record of its own and stays its.
+# The --root view in turn needs rootshim.so (see rootshim.c, built with
+# make): neither fake root nor the daemon has capabilities, so a directory
+# created with mode 000 — dpkg does that, chmodding later — can't be opened
+# by the daemon to finish the mkdir. The shim keeps the owner's bits.
+# A mount already present (another sandbox on this box, in the same mode:
+# the squashed and the plain view live under .mnt/root and .mnt/user) is
+# reused, not remounted; only mounts made here are unmounted at exit,
+# lazily, so a sandbox still using one keeps it alive
+LAYER_ARGS=()
+FUSE_MNTS=()
+cleanup() {
+  local M
+  for M in "${FUSE_MNTS[@]}"; do fusermount3 -u -z "$M" 2>/dev/null || true; done
+  [ -z "${TMP:-}" ] || rm -rf "$TMP"
 }
-sys_dir USR_ARGS --ro-bind /usr
-sys_dir OPT_ARGS --ro-bind-try /opt
-sys_dir ETC_ARGS --ro-bind /etc
+trap cleanup EXIT
+OWNER_XATTR=user.containers.override_stat   # fuse-overlayfs' record (xattr_permissions=2): "uid:gid:mode"
+# before a plain mount: label everything unrecorded root's, real mode kept
+mark_root() {
+  local STAMP="$BOX/.work/marked" F NEWER=()
+  mkdir -p "$BOX/.work"
+  [ ! -e "$STAMP" ] || NEWER=(-newercm "$STAMP")   # only what changed since the last pass
+  find "$BOX/usr" "$BOX/etc" "$BOX/opt" "$BOX/var" \( -type f -o -type d \) "${NEWER[@]}" -print0 2>/dev/null |
+    while IFS= read -r -d '' F; do
+      getfattr -n "$OWNER_XATTR" --only-values -- "$F" >/dev/null 2>&1 ||
+        setfattr -n "$OWNER_XATTR" -v "0:0:$(printf '%o' "0x$(stat -c %f -- "$F")")" -- "$F" || true
+    done
+  : > "$STAMP"
+}
+layer() {
+  local DIR="$1" MODE=user OPTS MNT
+  [ -z "$ROOT" ] || MODE=root
+  MNT="$BOX/.mnt/$MODE$DIR"
+  [ -d "$DIR" ] || return 0
+  mkdir -p "$MNT" "$BOX$DIR" "$BOX/.work$DIR"
+  if ! mountpoint -q "$MNT"; then
+    OPTS="lowerdir=$DIR,upperdir=$BOX$DIR,workdir=$BOX/.work$DIR"
+    if [ -n "$ROOT" ]
+    then OPTS="$OPTS,squash_to_uid=$(id -u),squash_to_gid=$(id -g)"
+    else OPTS="$OPTS,xattr_permissions=2"
+    fi
+    fuse-overlayfs -o "$OPTS" "$MNT" || { echo "sandbox.sh: fuse-overlayfs failed to mount $DIR" >&2; exit 1; }
+    FUSE_MNTS+=("$MNT")
+  fi
+  LAYER_ARGS+=(--bind "$MNT" "$DIR")
+}
+if [ -n "$LAYER" ]; then
+  command -v fuse-overlayfs >/dev/null || { echo "sandbox.sh: -l needs fuse-overlayfs (apt install fuse-overlayfs)" >&2; exit 1; }
+  # /var only exists in the sandbox with -l: package managers need it.
+  # dpkg's and apt's lock files are root-only on the host, so they can't be
+  # copied up to be opened for writing; shadow them with empty box files
+  for F in var/lib/dpkg/lock var/lib/dpkg/lock-frontend var/lib/dpkg/triggers/Lock var/lib/apt/lists/lock var/cache/apt/archives/lock; do
+    [ -e "/$F" ] && [ ! -r "/$F" ] && [ ! -e "$BOX/$F" ] && { mkdir -p "$BOX/${F%/*}"; : > "$BOX/$F"; }
+  done
+  [ -n "$ROOT" ] || mark_root
+  for DIR in /usr /etc /opt /var; do layer "$DIR"; done
+else
+  LAYER_ARGS=(--ro-bind /usr /usr --ro-bind-try /opt /opt --ro-bind /etc /etc)
+fi
+# --root: preload rootshim.so (built next to this script, see above)
+SHIM_ARGS=()
+SHIM=""
+if [ -n "$ROOT" ]; then
+  SHIM="$(dirname "$(realpath "${BASH_SOURCE[0]}")")/rootshim.so"
+  if [ -f "$SHIM" ]
+  then SHIM_ARGS=(--ro-bind "$SHIM" /run/sandbox/rootshim.so)
+  else echo "sandbox.sh: --root without rootshim.so (run make in ${SHIM%/*}): installers that create mode-000 dirs, like dpkg, will fail" >&2; SHIM=""
+  fi
+fi
 
 WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 
@@ -271,12 +362,10 @@ BWRAP_ARGS=(
   --die-with-parent
   $NEW_SESSION
   --hostname sandbox
-  "${USR_ARGS[@]}"
+  "${LAYER_ARGS[@]}"
   --symlink usr/bin /bin --symlink usr/sbin /sbin
   --symlink usr/lib /lib --symlink usr/lib64 /lib64
-  "${OPT_ARGS[@]}"
   "${SNAP_ARGS[@]}"
-  "${ETC_ARGS[@]}"
   "${RESOLV_ARGS[@]}"
   --proc /proc
   --dev /dev
@@ -299,6 +388,7 @@ BWRAP_ARGS=(
   # override settings.ini; dconf reads its db by mmap, so no D-Bus is needed
   --ro-bind-try "$HOME/.config/dconf/user" "$HOME/.config/dconf/user"
   "${BIND_ARGS[@]}"
+  "${SHIM_ARGS[@]}"
   --perms 0700 --dir "$XDG_RUNTIME_DIR"
   --ro-bind "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
   --setenv WAYLAND_DISPLAY "$WAYLAND_DISPLAY"
@@ -310,25 +400,28 @@ BWRAP_ARGS=(
   --unsetenv GTK_CSD
   --unsetenv DBUS_SESSION_BUS_ADDRESS
 )
-if [ -n "${LD_PRELOAD:-}" ]; then
-  PRELOAD=""
-  for LIB in ${LD_PRELOAD//:/ }; do
-    case "$LIB" in *nocsd*) ;; *) PRELOAD="$PRELOAD:$LIB" ;; esac
-  done
-  if [ -n "${PRELOAD#:}" ]
-  then BWRAP_ARGS+=(--setenv LD_PRELOAD "${PRELOAD#:}")
-  else BWRAP_ARGS+=(--unsetenv LD_PRELOAD)
-  fi
+PRELOAD=""
+for LIB in ${LD_PRELOAD:+${LD_PRELOAD//:/ }}; do
+  case "$LIB" in *nocsd*) ;; *) PRELOAD="$PRELOAD:$LIB" ;; esac
+done
+[ -z "$SHIM" ] || PRELOAD=":/run/sandbox/rootshim.so$PRELOAD"
+if [ -n "${PRELOAD#:}" ]
+then BWRAP_ARGS+=(--setenv LD_PRELOAD "${PRELOAD#:}")
+elif [ -n "${LD_PRELOAD:-}" ]
+then BWRAP_ARGS+=(--unsetenv LD_PRELOAD)
 fi
 
-[ -n "$NET" ] || exec bwrap "${BWRAP_ARGS[@]}" "$APP" "$@"
+if [ -z "$NET" ]; then
+  # exec unless there are layer mounts to clean up afterwards
+  [ ${#FUSE_MNTS[@]} -gt 0 ] || exec bwrap "${BWRAP_ARGS[@]}" "$APP" "$@"
+  bwrap "${BWRAP_ARGS[@]}" "$APP" "$@"; exit
+fi
 
 # -n: bwrap creates the namespaces (its AppArmor profile allows userns); pasta
 # only *attaches* to the sandbox netns via setns(), which the Ubuntu userns
 # restriction doesn't gate — so pasta needs no profile of its own. The app is
 # held on --block-fd until pasta has configured the network.
-TMP="$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/sandbox.XXXXXX")"
-trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/sandbox.XXXXXX")"   # removed by cleanup (trap above)
 mkfifo "$TMP/status" "$TMP/block"
 exec {STATUS_FD}<>"$TMP/status" {BLOCK_FD}<>"$TMP/block"   # rw so opens never block
 
