@@ -14,12 +14,19 @@ that you don't fully trust.
   the network namespace contains only loopback, so by default the app has no
   network access and can't see host interfaces. `-n` grants outbound internet
   through [pasta](https://passt.top/) while keeping the separate netns.
-- **Private home**: the app's `$HOME` is a bind mount of a sandbox dir —
-  by default the shared box `~/sandboxes/<real-home-path>` (e.g.
-  `~/sandboxes/home/user`), or a per-app / explicit box via `-a` / `-H`.
-  The real home directory is invisible.
+- **A box per sandbox**: everything the app keeps lives in one directory,
+  `~/sandboxes/<name>/` — by default the shared box `~/sandboxes/default`,
+  or a per-app / named box via `-a` / `-b`. The box is laid out like the
+  root filesystem:
+  - `home/<user>` (the real home path under the box, e.g.
+    `~/sandboxes/default/home/user`) is bind-mounted as the app's `$HOME`;
+    the real home directory is invisible.
+  - `usr/`, `etc/`, `opt/` hold the app's changes to the system when run
+    with `-l` (see below). (`.work/` is overlayfs' scratch space.)
 - **Read-only system**: `/usr`, `/etc`, `/opt`, `/sys` are bound read-only;
-  `/tmp` is a fresh tmpfs.
+  `/tmp` is a fresh tmpfs. With `-l` the first three become writable
+  overlays instead: the app can change "the system", but the changes land in
+  the box and the host stays untouched.
 - **Wayland GUI, GPU and sound**: the Wayland socket, `/dev/dri` and
   PipeWire/PulseAudio sockets are passed through. D-Bus is deliberately not.
   The webcam is not either, unless granted with `-p camera`.
@@ -43,29 +50,29 @@ that you don't fully trust.
 ## Usage
 
 ```sh
-sandbox.sh [-i|--interactive] [-w|--workdir DIR]... [-b|--bind DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-H|--home DIR] [-a|--app-home] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] [-p|--permissions LIST]... /usr/bin/someapp [args...]
+sandbox.sh [-i|--interactive] [-w|--bind DIR]... [-W|--workdir DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-b|--box NAME|DIR] [-a|--app-box] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] [-p|--permissions LIST]... [-l|--layer] /usr/bin/someapp [args...]
 ```
 
 - `-i`, `--interactive` — drop `--new-session` so an interactive shell inside
   the sandbox gets job control (like `docker run -i`). Only safe when the
   kernel has `dev.tty.legacy_tiocsti = 0` (default on modern kernels), which
   blocks the TIOCSTI terminal-injection attack `--new-session` guards against.
-- `-w DIR`, `--workdir DIR` — bind DIR read-write at its real path inside the
-  sandbox and start the app there (like `docker run -w`); if repeated, the app
-  starts in the last one. This is the way to hand the app a specific
+- `-w DIR`, `--bind DIR` — bind DIR read-write at its real path inside the
+  sandbox; repeatable. This is the way to hand the app a specific
   project/data directory while the rest of `$HOME` stays hidden.
   A symlink DIR is dereferenced: its target is bound at the target's path and
   the symlink itself is recreated inside the sandbox, so the path as given
-  keeps working (same for `-b`/`-r`).
-- `-b DIR`, `--bind DIR` — like `-w`, but without changing the start
-  directory; repeatable.
-- `-r DIR`, `--ro-bind DIR` — like `-b`, but read-only; repeatable.
-- `-d DIR`, `--chdir DIR` — start the app in DIR, overriding `-w`'s chdir.
-- `-H DIR`, `--home DIR` — use DIR as the sandbox home (created if missing).
-  Overrides `-a`.
-- `-a`, `--app-home` — use a per-app box, `~/sandboxes/<full-path-of-binary>`
-  (e.g. `/usr/bin/foo` → `~/sandboxes/usr/bin/foo`), instead of the default
-  shared box `~/sandboxes/<real-home-path>` that all apps see together.
+  keeps working (same for `-W`/`-r`).
+- `-W DIR`, `--workdir DIR` — like `-w`, and also start the app there (like
+  `docker run -w`); if repeated, the app starts in the last one.
+- `-r DIR`, `--ro-bind DIR` — like `-w`, but read-only; repeatable.
+- `-d DIR`, `--chdir DIR` — start the app in DIR, overriding `-W`'s chdir.
+- `-b NAME|DIR`, `--box NAME|DIR` — the box to use (created if missing): a
+  bare NAME means `~/sandboxes/NAME`, anything containing a slash is taken
+  as a directory. Overrides `-a`.
+- `-a`, `--app-box` — use a per-app box named after the binary's path, with
+  dashes for slashes (`/usr/bin/foo` → `~/sandboxes/usr-bin-foo`), instead
+  of the default shared box `~/sandboxes/default` that all apps see together.
 - `-n[IFACE]`, `--net[=IFACE]` — outbound internet access, still in a separate network
   namespace: bwrap creates the namespaces as usual, then `pasta` (rootless
   user-mode NAT, as used by Podman) *attaches* to the sandbox netns and relays
@@ -111,10 +118,18 @@ sandbox.sh [-i|--interactive] [-w|--workdir DIR]... [-b|--bind DIR]... [-r|--ro-
     D-Bus session bus there is no camera portal, so apps must use V4L2
     directly (Firefox and Chromium do).
   - `x11` — same as `-x`.
+- `-l`, `--layer` — writable system through a persistent layer: `/usr`,
+  `/etc` and `/opt` are mounted as overlayfs with the host dirs as the
+  read-only lower layer and the box's `usr/`, `etc/`, `opt/` as the
+  writable upper layer. The app sees a normal writable system — under `-n`
+  it is even (fake) root, so e.g. `dpkg -i`-style installs into `/usr` and
+  `/etc` edits work — while the host never changes; the box holds exactly
+  the diff, and wiping those dirs resets the system. Needs bubblewrap ≥ 0.9
+  (`--overlay`) and unprivileged overlayfs (Linux ≥ 5.11).
 
 The app name is resolved with `which`, so `sandbox.sh ping` and
 `sandbox.sh /usr/bin/ping` run the same binary and (with `-a`) use the same
-sandbox directory.
+box.
 
 ## Requirements
 
@@ -149,6 +164,15 @@ sandbox directory.
   as ambient capabilities — they apply only inside the sandbox's own
   namespaces. Note that without `-n`'s root mapping, Ubuntu's userns
   hardening still blocks some uses of them (e.g. raw sockets).
+- `-l` layers are per directory; a lower dir with mounts beneath it can't be
+  layered (overlayfs refuses it), which is why `/var` is left out — snaps
+  bind-mount into it. Running two sandboxes on the same layer at once is
+  allowed, but the kernel warns that concurrent access to the same files from
+  both mounts is undefined behavior — fine for a second browser window that
+  hands off to the running instance and exits, not for two long-running apps
+  writing the same files. A persistent writable `/usr` also means a
+  compromised app can plant binaries that run on its next start: the layer
+  is part of the sandbox's trust domain, like the home.
 - `ping` under `-n` sends packets (via the mirrored `CAP_NET_RAW`), but
   replies only come back if the host allows unprivileged ping sockets, which
   pasta uses to relay ICMP:

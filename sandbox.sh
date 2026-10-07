@@ -1,27 +1,32 @@
 #!/usr/bin/env bash
 set -eu
 
-usage() { echo "usage: sandbox.sh [-i|--interactive] [-w|--workdir DIR]... [-b|--bind DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-H|--home DIR] [-a|--app-home] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] [-p|--permissions LIST]... /usr/bin/someapp [args...]" >&2; exit 2; }
+usage() { echo "usage: sandbox.sh [-i|--interactive] [-w|--bind DIR]... [-W|--workdir DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-b|--box NAME|DIR] [-a|--app-box] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] [-p|--permissions LIST]... [-l|--layer] /usr/bin/someapp [args...]" >&2; exit 2; }
 
 help() {
   cat <<EOF
 usage: sandbox.sh [options] /usr/bin/someapp [args...]
 
 Run an app inside strict bubblewrap isolation: own namespaces, no network,
-read-only system, a private home under ~/sandboxes, Wayland/GPU/sound passed
-through. See README.md for details.
+read-only system, a private home, Wayland/GPU/sound passed through.
+Everything the app keeps lives in its box, ~/sandboxes/<name>/, laid out
+like the root filesystem:
+  home/$USER              bound as \$HOME
+  usr/ etc/ opt/          with -l: the app's changes to /usr, /etc, /opt
+See README.md for details.
 
 options:
   -i, --interactive   keep the terminal session for job control, like
                       'docker run -i' (drops bwrap's --new-session)
-  -w, --workdir DIR   rw-bind DIR at its real path and start the app there
+  -w, --bind DIR      rw-bind DIR at its real path; repeatable
+  -W, --workdir DIR   rw-bind DIR at its real path and start the app there
                       (in the last one if repeated)
-  -b, --bind DIR      rw-bind DIR at its real path; repeatable
   -r, --ro-bind DIR   ro-bind DIR at its real path; repeatable
-  -d, --chdir DIR     start the app in DIR (overrides -w's chdir)
-  -H, --home DIR      use DIR as the sandbox home
-                      (default: the shared box ~/sandboxes\$HOME)
-  -a, --app-home      per-app sandbox home instead: ~/sandboxes/<binary path>
+  -d, --chdir DIR     start the app in DIR (overrides -W's chdir)
+  -b, --box NAME|DIR  use box ~/sandboxes/NAME, or the directory DIR
+                      (default: the shared box ~/sandboxes/default)
+  -a, --app-box       per-app box instead, named after the binary's path:
+                      /usr/bin/foo -> ~/sandboxes/usr-bin-foo
   -n, --net[IFACE]    outbound networking via pasta (rootless NAT); snap
                       apps run as fake root inside. With an attached IFACE
                       (-nenp39s0 / --net=enp39s0) traffic is pinned to that
@@ -35,16 +40,19 @@ options:
                       repeatable. Known permissions:
                         camera   the webcam(s): /dev/video* and /dev/media*
                         x11      same as -x
+  -l, --layer         writable system: /usr, /etc and /opt become overlays
+                      whose changes persist in the box (usr/, etc/, opt/)
+                      and never reach the host
   -h, --help          show this help
 EOF
   exit 0
 }
 
 # '+' stops parsing at the first non-option, so the app's own flags pass through untouched
-OPTS=$(getopt -o +iw:b:r:d:hH:an::6xp: -l help,interactive,workdir:,bind:,ro-bind:,chdir:,home:,app-home,net::,ipv6,x11,permissions: -n sandbox.sh -- "$@") || usage
+OPTS=$(getopt -o +iw:W:r:d:hb:an::6xp:l -l help,interactive,bind:,workdir:,ro-bind:,chdir:,box:,app-box,net::,ipv6,x11,permissions:,layer -n sandbox.sh -- "$@") || usage
 eval set -- "$OPTS"
 
-# -w/-b/-r DIR: bind DIR's real path ($1: --bind/--ro-bind); a symlink DIR is
+# -w/-W/-r DIR: bind DIR's real path ($1: --bind/--ro-bind); a symlink DIR is
 # also recreated inside the sandbox, so the path as given keeps working
 bind_dir() {
   BOUND="$(realpath -e "$2")" || { echo "sandbox.sh: bind dir not found: $2" >&2; exit 1; }
@@ -54,11 +62,11 @@ bind_dir() {
 }
 
 NEW_SESSION="--new-session"   # -i: keep the terminal session (job control), like docker run -i
-BIND_ARGS=()                  # -w/-b/-r DIR (repeatable): rw-/ro-bind DIR at its real path
-WD=""                         # the last -w DIR: chdir there
-CD=""                         # --chdir DIR: start the app there (overrides -w's chdir)
-BOX=""                        # -h DIR: sandbox home; default is the shared box ~/sandboxes$HOME
-APP_HOME=""                   # -a: use a per-app box instead, ~/sandboxes/<binary path>
+BIND_ARGS=()                  # -w/-W/-r DIR (repeatable): rw-/ro-bind DIR at its real path
+WD=""                         # the last -W DIR: chdir there
+CD=""                         # --chdir DIR: start the app there (overrides -W's chdir)
+BOX=""                        # -b NAME|DIR: the box, ~/sandboxes/NAME or DIR; default ~/sandboxes/default
+APP_BOX=""                    # -a: use a per-app box instead, ~/sandboxes/usr-bin-foo
 NET=""                        # -n: pasta attaches to the sandbox netns for outbound networking
 NET_ARGS=()                   # -n: root mapping inside the sandbox userns
 RESOLV_ARGS=()                # -n: DNS goes through pasta's forwarder
@@ -67,18 +75,19 @@ IPV6=""
 OUT_IF=""                     # -nIFACE: mirror IFACE inside and pin pasta's sockets to it
 X11=""                        # -x: pass the X11 socket through (weakens isolation)
 CAMERA=""                     # -p camera: pass /dev/video* (V4L2 webcams) through
+LAYER=""                      # -l: overlay /usr, /etc, /opt; writes persist in the box's usr/ etc/ opt/
 DNS_FWD=169.254.1.1
 FWD_ARGS=(--dns-forward "$DNS_FWD")
 while true; do
   case "$1" in
     -h|--help) help ;;
     -i|--interactive) NEW_SESSION=""; shift ;;
-    -w|--workdir) bind_dir --bind "$2"; WD="$BOUND"; shift 2 ;;
-    -b|--bind) bind_dir --bind "$2"; shift 2 ;;
+    -w|--bind) bind_dir --bind "$2"; shift 2 ;;
+    -W|--workdir) bind_dir --bind "$2"; WD="$BOUND"; shift 2 ;;
     -r|--ro-bind) bind_dir --ro-bind "$2"; shift 2 ;;
     -d|--chdir) CD="$(realpath -m "$2")"; shift 2 ;;
-    -H|--home) BOX="$(realpath -m "$2")"; shift 2 ;;
-    -a|--app-home) APP_HOME=1; shift ;;
+    -b|--box) BOX="$2"; shift 2 ;;
+    -a|--app-box) APP_BOX=1; shift ;;
     -6|--ipv6) PASTA_IP=(); IPV6=1; shift ;;
     -x|--x11) X11=1; shift ;;
     # -p NAME[,NAME...]: named grants of host resources, so new ones don't
@@ -95,6 +104,7 @@ while true; do
       done; shift 2 ;;
     # the optional IFACE must be attached: -nIFACE / --net=IFACE
     -n|--net) NET=1; OUT_IF="$2"; shift 2 ;;
+    -l|--layer) LAYER=1; shift ;;
     --) shift; break ;;
   esac
 done
@@ -218,11 +228,39 @@ if [[ "$CAPS" == cap_* ]]; then
   for CAP in "${CAP_LIST[@]}"; do CAP_ARGS+=(--cap-add "${CAP^^}"); done
 fi
 
-# the sandbox "home": -h DIR as given; -a per-app ~/sandboxes/usr/bin/foo; default shared ~/sandboxes/home/user
+# the box holds everything the app keeps, laid out like /: <box>$HOME is
+# bound as the sandbox $HOME, <box>/usr etc. take the -l system writes.
+# -b: a bare NAME is a box under ~/sandboxes, anything with a slash is a
+# directory; -a: per-app box named after the binary's path with dashes for
+# slashes (/usr/bin/foo -> usr-bin-foo); default: the shared box
+# ~/sandboxes/default
 if [ -z "$BOX" ]; then
-  if [ -n "$APP_HOME" ]; then BOX="$HOME/sandboxes$APP"; else BOX="$HOME/sandboxes$HOME"; fi
+  if [ -n "$APP_BOX" ]; then APP_SLUG="${APP#/}"; BOX="$HOME/sandboxes/${APP_SLUG//\//-}"; else BOX="$HOME/sandboxes/default"; fi
+elif [[ "$BOX" != */* ]]; then BOX="$HOME/sandboxes/$BOX"
+else BOX="$(realpath -m "$BOX")"
 fi
-mkdir -p "$BOX"
+BOX_HOME="$BOX$HOME"
+mkdir -p "$BOX_HOME"
+
+# -l: mount DIR as an overlay instead of a read-only bind, with the writable
+# upper layer at <box>/DIR (and overlayfs' scratch dir, which must be on the
+# same filesystem, at <box>/.work/DIR) — the app sees a writable system, the
+# host never changes. Sets the array named $1; $2 is the bind flag used
+# without -l
+sys_dir() {
+  local -n OUT="$1"; local DIR="$3"
+  if [ -z "$LAYER" ]; then OUT=("$2" "$DIR" "$DIR"); return; fi
+  [ -d "$DIR" ] || { OUT=(); return; }
+  # overlayfs can't use a lower dir with mounts beneath it (EINVAL, "failed to
+  # clone lowerpath") — e.g. /var, where snaps bind-mount things
+  local SUB; SUB="$(findmnt -rn -o TARGET | grep -m1 "^$DIR/" || true)"
+  [ -z "$SUB" ] || { echo "sandbox.sh: can't layer $DIR: $SUB is mounted under it" >&2; exit 1; }
+  mkdir -p "$BOX$DIR" "$BOX/.work$DIR"
+  OUT=(--overlay-src "$DIR" --overlay "$BOX$DIR" "$BOX/.work$DIR" "$DIR")
+}
+sys_dir USR_ARGS --ro-bind /usr
+sys_dir OPT_ARGS --ro-bind-try /opt
+sys_dir ETC_ARGS --ro-bind /etc
 
 WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 
@@ -233,12 +271,12 @@ BWRAP_ARGS=(
   --die-with-parent
   $NEW_SESSION
   --hostname sandbox
-  --ro-bind /usr /usr
+  "${USR_ARGS[@]}"
   --symlink usr/bin /bin --symlink usr/sbin /sbin
   --symlink usr/lib /lib --symlink usr/lib64 /lib64
-  --ro-bind-try /opt /opt
+  "${OPT_ARGS[@]}"
   "${SNAP_ARGS[@]}"
-  --ro-bind /etc /etc
+  "${ETC_ARGS[@]}"
   "${RESOLV_ARGS[@]}"
   --proc /proc
   --dev /dev
@@ -247,7 +285,7 @@ BWRAP_ARGS=(
   --ro-bind /sys /sys
   --tmpfs /tmp
   "${X11_ARGS[@]}"
-  --bind "$BOX" "$HOME"
+  --bind "$BOX_HOME" "$HOME"
   # system appearance (dark/light theme): host toolkit configs, read-only
   --ro-bind-try "$HOME/.config/kdeglobals" "$HOME/.config/kdeglobals"
   --ro-bind-try "$HOME/.config/gtk-3.0/settings.ini" "$HOME/.config/gtk-3.0/settings.ini"
