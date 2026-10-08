@@ -8,17 +8,52 @@ use crate::util::{die, output, run as run_tool, warn};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::io::{FromRawFd, OwnedFd, AsRawFd, RawFd};
-use std::os::unix::process::CommandExt;
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::Path;
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
-/// fds bwrap gets: status report, block, and the resolv.conf contents
-pub const STATUS_FD: RawFd = 100;
-pub const BLOCK_FD: RawFd = 101;
-pub const RESOLV_FD: RawFd = 102;
+/// The pipes bwrap is handed, created before its argument list is built so
+/// their numbers can go into it. The child-side ends are inheritable (not
+/// close-on-exec, which Rust sets on everything it opens); the parent drops
+/// them right after spawning bwrap, so later children (pasta, nsenter)
+/// don't get them.
+pub struct Pipes {
+    /// `--json-status-fd`: bwrap reports the sandbox's pid here once the
+    /// namespaces exist
+    pub status_r: OwnedFd,
+    pub status_w: OwnedFd,
+    /// `--block-fd`: bwrap reads this before starting the app — the read
+    /// blocks until we write a byte, once pasta has set the network up
+    pub block_r: OwnedFd,
+    pub block_w: OwnedFd,
+    /// `--ro-bind-data`: the resolv.conf contents
+    pub resolv_r: OwnedFd,
+    pub resolv_w: OwnedFd,
+}
+
+impl Pipes {
+    pub fn new() -> Pipes {
+        let (status_r, status_w) = pipe();
+        let (block_r, block_w) = pipe();
+        let (resolv_r, resolv_w) = pipe();
+        for child_end in [&status_w, &block_r, &resolv_r] {
+            // SAFETY: a valid fd we own
+            if unsafe { libc::fcntl(child_end.as_raw_fd(), libc::F_SETFD, 0) } < 0 {
+                die(1, format!("fcntl: {}", std::io::Error::last_os_error()));
+            }
+        }
+        Pipes {
+            status_r,
+            status_w,
+            block_r,
+            block_w,
+            resolv_r,
+            resolv_w,
+        }
+    }
+}
 
 pub struct Net {
     /// -4, or nothing with -6 (pasta's defaults are both)
@@ -43,7 +78,12 @@ pub fn configure(out_if: Option<&str>, ipv6: bool) -> Net {
     }
     // SO_BINDTODEVICE pins pasta's host sockets to IFACE, so its traffic
     // bypasses e.g. a WireGuard fwmark default route and leaves through IFACE
-    net.out_args = vec!["-i".into(), iface.into(), "--outbound-if4".into(), iface.into()];
+    net.out_args = vec![
+        "-i".into(),
+        iface.into(),
+        "--outbound-if4".into(),
+        iface.into(),
+    ];
     if ipv6 {
         net.out_args.extend(["--outbound-if6".into(), iface.into()]);
     }
@@ -57,12 +97,22 @@ pub fn configure(out_if: Option<&str>, ipv6: bool) -> Net {
         let ns4 = servers.split_whitespace().find(|s| !s.contains(':'));
         let ns6 = servers.split_whitespace().find(|s| s.contains(':'));
         let pasta_has_dns_host = output("pasta", &["--help"])
-            .or_else(|| Command::new("pasta").arg("--help").output().ok().map(|o| String::from_utf8_lossy(&o.stderr).into_owned()))
+            .or_else(|| {
+                Command::new("pasta")
+                    .arg("--help")
+                    .output()
+                    .ok()
+                    .map(|o| String::from_utf8_lossy(&o.stderr).into_owned())
+            })
             .map(|h| h.contains("--dns-host"))
             .unwrap_or(false);
         if pasta_has_dns_host {
-            if let Some(s) = ns4 { net.out_args.extend(["--dns-host".into(), s.into()]); }
-            if let (Some(s), true) = (ns6, ipv6) { net.out_args.extend(["--dns-host".into(), s.into()]); }
+            if let Some(s) = ns4 {
+                net.out_args.extend(["--dns-host".into(), s.into()]);
+            }
+            if let (Some(s), true) = (ns6, ipv6) {
+                net.out_args.extend(["--dns-host".into(), s.into()]);
+            }
         } else if let Some(s) = ns4 {
             // old pasta (< 2024_10_30, e.g. Ubuntu 24.04) can't retarget the
             // forwarder: point the sandbox resolv.conf straight at the upstream
@@ -116,45 +166,57 @@ fn pipe() -> (OwnedFd, OwnedFd) {
 /// Exit status of a finished child as a shell would report it.
 pub fn exit_code(status: std::process::ExitStatus) -> i32 {
     use std::os::unix::process::ExitStatusExt;
-    status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
+    status
+        .code()
+        .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
 }
 
 /// Run bwrap with networking: spawn it held on the block fd, attach pasta,
 /// set sysctls, release it, write the app's nested uid map, wait.
-pub fn run(bwrap_args: &[OsString], app_wrap: &[String], app: &Path, app_args: &[String], net: &Net, snap: bool) -> i32 {
-    let (status_r, status_w) = pipe();
-    let (block_r, block_w) = pipe();
-    let (resolv_r, resolv_w) = pipe();
+pub fn run(
+    bwrap_args: &[OsString],
+    app_wrap: &[String],
+    app: &Path,
+    app_args: &[String],
+    net: &Net,
+    snap: bool,
+    pipes: Pipes,
+) -> i32 {
+    let Pipes {
+        status_r,
+        status_w,
+        block_r,
+        block_w,
+        resolv_r,
+        resolv_w,
+    } = pipes;
     {
         let mut w = fs::File::from(resolv_w);
-        let _ = write!(w, "nameserver {}\n", net.dns_fwd);
+        let _ = writeln!(w, "nameserver {}", net.dns_fwd);
     } // closed: bwrap reads the data up to EOF
 
-    let mut cmd = Command::new("bwrap");
-    cmd.arg("--json-status-fd").arg(STATUS_FD.to_string())
-        .arg("--block-fd").arg(BLOCK_FD.to_string())
+    let mut child = Command::new("bwrap")
+        .arg("--json-status-fd")
+        .arg(status_w.as_raw_fd().to_string())
+        .arg("--block-fd")
+        .arg(block_r.as_raw_fd().to_string())
         .args(bwrap_args)
         .args(app_wrap)
         .arg(app)
-        .args(app_args);
-    let (sw, br, rr) = (status_w.as_raw_fd(), block_r.as_raw_fd(), resolv_r.as_raw_fd());
-    // SAFETY: only dup2 calls in the child, which are async-signal-safe
-    unsafe {
-        cmd.pre_exec(move || {
-            for (from, to) in [(sw, STATUS_FD), (br, BLOCK_FD), (rr, RESOLV_FD)] {
-                if libc::dup2(from, to) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
-            Ok(())
-        });
-    }
-    let mut child = cmd.spawn().unwrap_or_else(|e| die(1, format!("cannot run bwrap: {e}")));
+        .args(app_args)
+        .spawn()
+        .unwrap_or_else(|e| die(1, format!("cannot run bwrap: {e}")));
     forward_signals_to(&child);
     drop(status_w);
     drop(block_r);
     drop(resolv_r);
-    let kill_all = |pids: &[i32]| for p in pids { if *p > 0 { unsafe { libc::kill(*p, libc::SIGKILL) }; } };
+    let kill_all = |pids: &[i32]| {
+        for p in pids {
+            if *p > 0 {
+                unsafe { libc::kill(*p, libc::SIGKILL) };
+            }
+        }
+    };
 
     // the first status message arrives once the namespaces exist; it also
     // carries namespace inode numbers, so pick the child-pid field specifically
@@ -173,7 +235,12 @@ pub fn run(bwrap_args: &[OsString], app_wrap: &[String], app: &Path, app_args: &
     pasta.extend(net.pasta_ip.iter().cloned());
     pasta.extend(net.out_args.iter().cloned());
     pasta.extend(net.fwd_args.iter().cloned());
-    pasta.extend(["--userns".into(), format!("/proc/{child_pid}/ns/user"), "--netns".into(), format!("/proc/{child_pid}/ns/net")]);
+    pasta.extend([
+        "--userns".into(),
+        format!("/proc/{child_pid}/ns/user"),
+        "--netns".into(),
+        format!("/proc/{child_pid}/ns/net"),
+    ]);
     let pasta_ref: Vec<&str> = pasta.iter().map(String::as_str).collect();
     if !run_tool("pasta", &pasta_ref) {
         kill_all(&[child_pid, child.id() as i32]);
@@ -191,7 +258,16 @@ pub fn run(bwrap_args: &[OsString], app_wrap: &[String], app: &Path, app_args: &
         sysctls += "; echo 0 > /proc/sys/user/max_user_namespaces";
     }
     let _ = Command::new("nsenter")
-        .args(["--preserve-credentials", "-U", "-n", "-t", &child_pid.to_string(), "sh", "-c", &sysctls])
+        .args([
+            "--preserve-credentials",
+            "-U",
+            "-n",
+            "-t",
+            &child_pid.to_string(),
+            "sh",
+            "-c",
+            &sysctls,
+        ])
         .stderr(std::process::Stdio::null())
         .status();
 
@@ -213,9 +289,10 @@ pub fn run(bwrap_args: &[OsString], app_wrap: &[String], app: &Path, app_args: &
             if !Path::new(&format!("/proc/{child_pid}")).exists() {
                 break; // app already gone
             }
-            let app_pid = fs::read_to_string(format!("/proc/{child_pid}/task/{child_pid}/children"))
-                .ok()
-                .and_then(|s| s.split_whitespace().next().map(str::to_string));
+            let app_pid =
+                fs::read_to_string(format!("/proc/{child_pid}/task/{child_pid}/children"))
+                    .ok()
+                    .and_then(|s| s.split_whitespace().next().map(str::to_string));
             if let Some(app_pid) = app_pid {
                 let ns = fs::read_link(format!("/proc/{app_pid}/ns/user")).ok();
                 if ns.is_some() && ns != outer_ns {
@@ -224,7 +301,15 @@ pub fn run(bwrap_args: &[OsString], app_wrap: &[String], app: &Path, app_args: &
                         crate::util::gid(), crate::util::uid()
                     );
                     mapped = Command::new("nsenter")
-                        .args(["--preserve-credentials", "-U", "-t", &child_pid.to_string(), "sh", "-c", &script])
+                        .args([
+                            "--preserve-credentials",
+                            "-U",
+                            "-t",
+                            &child_pid.to_string(),
+                            "sh",
+                            "-c",
+                            &script,
+                        ])
                         .status()
                         .map(|s| s.success())
                         .unwrap_or(false);
@@ -237,7 +322,9 @@ pub fn run(bwrap_args: &[OsString], app_wrap: &[String], app: &Path, app_args: &
             warn("setting the app's uid map failed; it runs as nobody");
         }
     }
-    let status = child.wait().unwrap_or_else(|e| die(1, format!("waiting for bwrap: {e}")));
+    let status = child
+        .wait()
+        .unwrap_or_else(|e| die(1, format!("waiting for bwrap: {e}")));
     exit_code(status)
 }
 
@@ -251,7 +338,11 @@ fn read_line_timeout(fd: OwnedFd, timeout: Duration) -> Option<String> {
         if left.is_zero() {
             return None;
         }
-        let mut pfd = libc::pollfd { fd: f.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        let mut pfd = libc::pollfd {
+            fd: f.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
         // SAFETY: one valid pollfd
         let n = unsafe { libc::poll(&mut pfd, 1, left.as_millis() as i32) };
         if n <= 0 {
@@ -259,7 +350,9 @@ fn read_line_timeout(fd: OwnedFd, timeout: Duration) -> Option<String> {
         }
         let mut b = [0u8; 1];
         match f.read(&mut b) {
-            Ok(0) => return (!line.is_empty()).then(|| String::from_utf8_lossy(&line).into_owned()),
+            Ok(0) => {
+                return (!line.is_empty()).then(|| String::from_utf8_lossy(&line).into_owned())
+            }
             Ok(_) if b[0] == b'\n' => return Some(String::from_utf8_lossy(&line).into_owned()),
             Ok(_) => line.push(b[0]),
             Err(_) => return None,

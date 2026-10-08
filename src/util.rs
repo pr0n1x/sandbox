@@ -49,7 +49,9 @@ pub fn absolute(p: &Path) -> PathBuf {
     let joined = if p.is_absolute() {
         p.to_path_buf()
     } else {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")).join(p)
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("/"))
+            .join(p)
     };
     let mut out = PathBuf::from("/");
     for c in joined.components() {
@@ -69,7 +71,10 @@ pub fn absolute(p: &Path) -> PathBuf {
 pub fn which(name: &str) -> Option<PathBuf> {
     let is_exe = |p: &Path| {
         fs::metadata(p)
-            .map(|m| m.is_file() && (std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o111) != 0)
+            .map(|m| {
+                m.is_file()
+                    && (std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o111) != 0
+            })
             .unwrap_or(false)
     };
     if name.contains('/') {
@@ -94,7 +99,9 @@ pub fn has_mounts_under(dir: &Path) -> bool {
 }
 
 fn mounts() -> Vec<PathBuf> {
-    let Ok(text) = fs::read_to_string("/proc/self/mounts") else { return Vec::new() };
+    let Ok(text) = fs::read_to_string("/proc/self/mounts") else {
+        return Vec::new();
+    };
     text.lines()
         .filter_map(|l| l.split(' ').nth(1))
         .map(unescape_mount)
@@ -107,7 +114,10 @@ fn unescape_mount(s: &str) -> PathBuf {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'\\' && i + 3 < b.len() + 0 && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c)) {
+        if b[i] == b'\\'
+            && i + 3 < b.len()
+            && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c))
+        {
             let v = (b[i + 1] - b'0') * 64 + (b[i + 2] - b'0') * 8 + (b[i + 3] - b'0');
             out.push(v);
             i += 4;
@@ -135,19 +145,41 @@ pub fn set_xattr(path: &Path, name: &str, value: &str) -> io::Result<()> {
     let p = cpath(path);
     let n = CString::new(name).unwrap();
     // SAFETY: valid C strings and a valid buffer of the given length
-    let rc = unsafe { libc::lsetxattr(p.as_ptr(), n.as_ptr(), value.as_ptr().cast(), value.len(), 0) };
-    if rc < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+    let rc = unsafe {
+        libc::lsetxattr(
+            p.as_ptr(),
+            n.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            0,
+        )
+    };
+    if rc < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 /// Run a tool, inheriting stdio; true on exit status 0.
 pub fn run(cmd: &str, args: &[&str]) -> bool {
-    Command::new(cmd).args(args).status().map(|s| s.success()).unwrap_or(false)
+    Command::new(cmd)
+        .args(args)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// Run a tool quietly and return its stdout on success.
 pub fn output(cmd: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new(cmd).args(args).stderr(Stdio::null()).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    let out = Command::new(cmd)
+        .args(args)
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 pub fn exists(cmd: &str) -> bool {

@@ -2,7 +2,9 @@
 //! bound as the sandbox home; `<box>/usr`, `/etc`, `/opt`, `/var` are the
 //! writable upper layers of the system, once a `--root` run created them.
 
-use crate::util::{die, exists, has_mounts_under, has_xattr, is_mountpoint, realpath_m, run, set_xattr, uid, gid};
+use crate::util::{
+    die, exists, gid, has_mounts_under, has_xattr, is_mountpoint, realpath_m, run, set_xattr, uid,
+};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
@@ -38,15 +40,22 @@ pub fn resolve(opt: Option<&str>, app_box: bool, app: Option<&Path>, home: &Path
         Some(name) => sandboxes.join(name),
         None if app_box => {
             let app = app.unwrap_or_else(|| die(2, "-a needs an app to name the box after"));
-            let slug = app.to_string_lossy().trim_start_matches('/').replace('/', "-");
+            let slug = app
+                .to_string_lossy()
+                .trim_start_matches('/')
+                .replace('/', "-");
             sandboxes.join(slug)
         }
         None => sandboxes.join("default"),
     };
     let rel_home = home.strip_prefix("/").unwrap_or(home);
     let box_home = path.join(rel_home);
-    fs::create_dir_all(&box_home).unwrap_or_else(|e| die(1, format!("cannot create {}: {e}", box_home.display())));
-    BoxDir { path, home: box_home }
+    fs::create_dir_all(&box_home)
+        .unwrap_or_else(|e| die(1, format!("cannot create {}: {e}", box_home.display())));
+    BoxDir {
+        path,
+        home: box_home,
+    }
 }
 
 /// --reset-system: back to the host's system, home untouched. Not while the
@@ -54,13 +63,20 @@ pub fn resolve(opt: Option<&str>, app_box: bool, app: Option<&Path>, home: &Path
 /// keep serving from directories pulled away under them.
 pub fn reset_system(b: &BoxDir) {
     if has_mounts_under(&b.path.join(".mnt")) {
-        die(1, format!("{} is in use (its layers are mounted); stop its sandboxes first", b.path.display()));
+        die(
+            1,
+            format!(
+                "{} is in use (its layers are mounted); stop its sandboxes first",
+                b.path.display()
+            ),
+        );
     }
     make_removable(&b.path.join(".work")); // overlay scratch dirs can be mode 000
     for d in LAYERED.iter().chain([".work", ".mnt"].iter()) {
         let p = b.path.join(d);
         if p.exists() {
-            fs::remove_dir_all(&p).unwrap_or_else(|e| die(1, format!("cannot remove {}: {e}", p.display())));
+            fs::remove_dir_all(&p)
+                .unwrap_or_else(|e| die(1, format!("cannot remove {}: {e}", p.display())));
         }
     }
 }
@@ -69,7 +85,9 @@ pub fn reset_system(b: &BoxDir) {
 /// it can be removed (the kernel overlay used to leave mode-000 work dirs).
 fn make_removable(dir: &Path) {
     use std::os::unix::fs::PermissionsExt;
-    let Ok(meta) = fs::symlink_metadata(dir) else { return };
+    let Ok(meta) = fs::symlink_metadata(dir) else {
+        return;
+    };
     if !meta.is_dir() {
         return;
     }
@@ -79,7 +97,9 @@ fn make_removable(dir: &Path) {
             let p = e.path();
             match fs::symlink_metadata(&p) {
                 Ok(m) if m.is_dir() => make_removable(&p),
-                Ok(m) if m.is_file() => { let _ = fs::set_permissions(&p, fs::Permissions::from_mode(m.mode() | 0o600)); }
+                Ok(m) if m.is_file() => {
+                    let _ = fs::set_permissions(&p, fs::Permissions::from_mode(m.mode() | 0o600));
+                }
                 _ => {}
             }
         }
@@ -101,7 +121,20 @@ pub struct Layer {
 /// The plain system: host dirs bound read-only, no /var.
 pub fn plain() -> Layer {
     Layer {
-        args: ["--ro-bind", "/usr", "/usr", "--ro-bind-try", "/opt", "/opt", "--ro-bind", "/etc", "/etc"].iter().map(OsString::from).collect(),
+        args: [
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind-try",
+            "/opt",
+            "/opt",
+            "--ro-bind",
+            "/etc",
+            "/etc",
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect(),
         mounts: Vec::new(),
     }
 }
@@ -137,28 +170,44 @@ pub fn plain() -> Layer {
 /// lazily, so a sandbox still using one keeps it alive.
 pub fn mount_layer(b: &BoxDir, root: bool) -> Layer {
     if !exists("fuse-overlayfs") {
-        die(1, "this box has a system layer, which needs fuse-overlayfs (apt install fuse-overlayfs)");
+        die(
+            1,
+            "this box has a system layer, which needs fuse-overlayfs (apt install fuse-overlayfs)",
+        );
     }
     // /var only exists in the sandbox with a layer: package managers need it.
     // dpkg's and apt's lock files are root-only on the host, so they can't be
     // copied up to be opened for writing; shadow them with empty box files
-    for f in ["var/lib/dpkg/lock", "var/lib/dpkg/lock-frontend", "var/lib/dpkg/triggers/Lock", "var/lib/apt/lists/lock", "var/cache/apt/archives/lock"] {
+    for f in [
+        "var/lib/dpkg/lock",
+        "var/lib/dpkg/lock-frontend",
+        "var/lib/dpkg/triggers/Lock",
+        "var/lib/apt/lists/lock",
+        "var/cache/apt/archives/lock",
+    ] {
         let host = Path::new("/").join(f);
         let shadow = b.path.join(f);
         if host.exists() && fs::File::open(&host).is_err() && !shadow.exists() {
-            if let Some(parent) = shadow.parent() { let _ = fs::create_dir_all(parent); }
+            if let Some(parent) = shadow.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
             let _ = fs::File::create(&shadow);
         }
     }
     let _ = fs::create_dir_all(b.path.join(".work"));
-    if !is_mountpoint(&b.path.join(".mnt/user/var")) && !is_mountpoint(&b.path.join(".mnt/root/var")) {
+    if !is_mountpoint(&b.path.join(".mnt/user/var"))
+        && !is_mountpoint(&b.path.join(".mnt/root/var"))
+    {
         rebuild_dpkg_status(b);
     }
     if !root {
         mark_root(b);
     }
     let mode = if root { "root" } else { "user" };
-    let mut layer = Layer { args: Vec::new(), mounts: Vec::new() };
+    let mut layer = Layer {
+        args: Vec::new(),
+        mounts: Vec::new(),
+    };
     for d in LAYERED {
         let dir = Path::new("/").join(d);
         if !dir.is_dir() {
@@ -168,21 +217,32 @@ pub fn mount_layer(b: &BoxDir, root: bool) -> Layer {
         let upper = b.path.join(d);
         let work = b.path.join(".work").join(d);
         for p in [&mnt, &upper, &work] {
-            fs::create_dir_all(p).unwrap_or_else(|e| die(1, format!("cannot create {}: {e}", p.display())));
+            fs::create_dir_all(p)
+                .unwrap_or_else(|e| die(1, format!("cannot create {}: {e}", p.display())));
         }
         if !is_mountpoint(&mnt) {
-            let mut opts = format!("lowerdir={},upperdir={},workdir={}", dir.display(), upper.display(), work.display());
+            let mut opts = format!(
+                "lowerdir={},upperdir={},workdir={}",
+                dir.display(),
+                upper.display(),
+                work.display()
+            );
             if root {
                 opts += &format!(",squash_to_uid={},squash_to_gid={}", uid(), gid());
             } else {
                 opts += ",xattr_permissions=2";
             }
             if !run("fuse-overlayfs", &["-o", &opts, &mnt.to_string_lossy()]) {
-                die(1, format!("fuse-overlayfs failed to mount {}", dir.display()));
+                die(
+                    1,
+                    format!("fuse-overlayfs failed to mount {}", dir.display()),
+                );
             }
             layer.mounts.push(mnt.clone());
         }
-        layer.args.extend(["--bind".into(), mnt.into_os_string(), dir.into_os_string()]);
+        layer
+            .args
+            .extend(["--bind".into(), mnt.into_os_string(), dir.into_os_string()]);
     }
     layer
 }
@@ -205,7 +265,8 @@ pub fn shim_args(b: &BoxDir) -> Vec<OsString> {
     let so = b.path.join(".work/rootshim.so");
     let _ = fs::create_dir_all(b.path.join(".work"));
     if fs::read(&so).map(|cur| cur != ROOTSHIM).unwrap_or(true) {
-        fs::write(&so, ROOTSHIM).unwrap_or_else(|e| die(1, format!("cannot write {}: {e}", so.display())));
+        fs::write(&so, ROOTSHIM)
+            .unwrap_or_else(|e| die(1, format!("cannot write {}: {e}", so.display())));
     }
     let inside_in_box = b.path.join(SHIM_INSIDE.trim_start_matches('/'));
     let _ = fs::create_dir_all(inside_in_box.parent().unwrap());
@@ -219,12 +280,18 @@ pub fn shim_args(b: &BoxDir) -> Vec<OsString> {
 /// A stamp keeps the pass to what changed since the last one.
 fn mark_root(b: &BoxDir) {
     let stamp = b.path.join(".work/marked");
-    let since = fs::metadata(&stamp).ok().map(|m| (m.mtime(), m.mtime_nsec()));
+    let since = fs::metadata(&stamp)
+        .ok()
+        .map(|m| (m.mtime(), m.mtime_nsec()));
     fn walk(dir: &Path, since: Option<(i64, i64)>) {
-        let Ok(entries) = fs::read_dir(dir) else { return };
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
         for e in entries.flatten() {
             let p = e.path();
-            let Ok(m) = fs::symlink_metadata(&p) else { continue };
+            let Ok(m) = fs::symlink_metadata(&p) else {
+                continue;
+            };
             if m.is_dir() {
                 walk(&p, since);
             }
@@ -244,7 +311,9 @@ fn mark_root(b: &BoxDir) {
     for d in LAYERED {
         let top = b.path.join(d);
         if let Ok(m) = fs::symlink_metadata(&top) {
-            let fresh = since.map(|(s, sn)| (m.ctime(), m.ctime_nsec()) > (s, sn)).unwrap_or(true);
+            let fresh = since
+                .map(|(s, sn)| (m.ctime(), m.ctime_nsec()) > (s, sn))
+                .unwrap_or(true);
             if fresh && !has_xattr(&top, OWNER_XATTR) {
                 let _ = set_xattr(&top, OWNER_XATTR, &format!("0:0:{:o}", m.mode()));
             }
@@ -262,8 +331,12 @@ fn mark_root(b: &BoxDir) {
 /// list in the box's info/) replacing or appended.
 fn rebuild_dpkg_status(b: &BoxDir) {
     let db = b.path.join("var/lib/dpkg");
-    let Ok(box_status) = fs::read_to_string(db.join("status")) else { return };
-    let Ok(host_status) = fs::read_to_string("/var/lib/dpkg/status") else { return };
+    let Ok(box_status) = fs::read_to_string(db.join("status")) else {
+        return;
+    };
+    let Ok(host_status) = fs::read_to_string("/var/lib/dpkg/status") else {
+        return;
+    };
     // the packages the box installed: pkg.list, or pkg:arch.list for non-native ones
     let box_pkgs: HashSet<String> = fs::read_dir(db.join("info"))
         .map(|rd| {
@@ -278,18 +351,30 @@ fn rebuild_dpkg_status(b: &BoxDir) {
         let mut pkg = "";
         let mut arch = "";
         for line in para.lines() {
-            if let Some(v) = line.strip_prefix("Package: ") { pkg = v }
-            if let Some(v) = line.strip_prefix("Architecture: ") { arch = v }
+            if let Some(v) = line.strip_prefix("Package: ") {
+                pkg = v
+            }
+            if let Some(v) = line.strip_prefix("Architecture: ") {
+                arch = v
+            }
         }
         (pkg.to_string(), format!("{pkg}:{arch}"))
     }
-    let paragraphs = |s: &str| -> Vec<String> { s.split("\n\n").map(str::trim_end).filter(|p| !p.is_empty()).map(str::to_string).collect() };
+    let paragraphs = |s: &str| -> Vec<String> {
+        s.split("\n\n")
+            .map(str::trim_end)
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
     let mut own: HashMap<String, String> = HashMap::new();
     let mut order: Vec<String> = Vec::new(); // keep box paragraphs in their own order when appended
     for p in paragraphs(&box_status) {
         let (name, full) = key(&p);
         if box_pkgs.contains(&name) || box_pkgs.contains(&full) {
-            if !own.contains_key(&full) { order.push(full.clone()); }
+            if !own.contains_key(&full) {
+                order.push(full.clone());
+            }
             own.insert(full, p);
         }
     }
@@ -297,8 +382,12 @@ fn rebuild_dpkg_status(b: &BoxDir) {
     for p in paragraphs(&host_status) {
         let (_, full) = key(&p);
         match own.remove(&full) {
-            Some(ours) => { out += &ours; }
-            None => { out += &p; }
+            Some(ours) => {
+                out += &ours;
+            }
+            None => {
+                out += &p;
+            }
         }
         out += "\n\n";
     }

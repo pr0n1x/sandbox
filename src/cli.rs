@@ -2,7 +2,7 @@
 //! non-option, so the app's own flags pass through), with the same help text
 //! the script had.
 
-use crate::util::{die, realpath_e, realpath_m, absolute};
+use crate::util::{absolute, die, realpath_e, realpath_m};
 use std::path::PathBuf;
 
 pub const USAGE: &str = "usage: sandbox [-i|--interactive] [-w|--bind DIR]... [-W|--workdir DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-b|--box NAME|DIR] [-a|--app-box] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] [-p|--permissions LIST]... [--root] /usr/bin/someapp [args...]
@@ -104,14 +104,22 @@ fn bind(ro: bool, dir: &str) -> Bind {
     let given = PathBuf::from(dir);
     let real = realpath_e(&given).unwrap_or_else(|_| die(1, format!("bind dir not found: {dir}")));
     let orig = absolute(&given);
-    Bind { ro, real: real.clone(), symlink_from: (orig != real).then_some(orig) }
+    Bind {
+        ro,
+        real: real.clone(),
+        symlink_from: (orig != real).then_some(orig),
+    }
 }
 
 pub fn parse(args: Vec<String>) -> Opts {
     let mut o = Opts::default();
     let mut it = args.into_iter().peekable();
     // value of an option that takes one: attached ("-bNAME", "--box=NAME") or the next arg
-    fn value(attached: Option<String>, it: &mut std::iter::Peekable<std::vec::IntoIter<String>>, name: &str) -> String {
+    fn value(
+        attached: Option<String>,
+        it: &mut std::iter::Peekable<std::vec::IntoIter<String>>,
+        name: &str,
+    ) -> String {
         attached.or_else(|| it.next()).unwrap_or_else(|| {
             eprintln!("sandbox: option requires an argument -- '{name}'");
             usage()
@@ -132,21 +140,36 @@ pub fn parse(args: Vec<String>) -> Opts {
                 None => (long, None),
             };
             match name {
-                "help" => { print!("{}", help()); std::process::exit(0) }
+                "help" => {
+                    print!("{}", help());
+                    std::process::exit(0)
+                }
                 "interactive" => o.interactive = true,
                 "bind" => o.binds.push(bind(false, &value(attached, &mut it, name))),
-                "workdir" => { let b = bind(false, &value(attached, &mut it, name)); o.workdir = Some(b.real.clone()); o.binds.push(b) }
+                "workdir" => {
+                    let b = bind(false, &value(attached, &mut it, name));
+                    o.workdir = Some(b.real.clone());
+                    o.binds.push(b)
+                }
                 "ro-bind" => o.binds.push(bind(true, &value(attached, &mut it, name))),
-                "chdir" => o.chdir = Some(realpath_m(&PathBuf::from(value(attached, &mut it, name)))),
+                "chdir" => {
+                    o.chdir = Some(realpath_m(&PathBuf::from(value(attached, &mut it, name))))
+                }
                 "box" => o.box_ = Some(value(attached, &mut it, name)),
                 "app-box" => o.app_box = true,
-                "net" => { o.net = true; o.out_if = attached.filter(|s| !s.is_empty()) } // IFACE only attached: --net=IFACE
+                "net" => {
+                    o.net = true;
+                    o.out_if = attached.filter(|s| !s.is_empty())
+                } // IFACE only attached: --net=IFACE
                 "ipv6" => o.ipv6 = true,
                 "x11" => o.x11 = true,
                 "permissions" => permissions(&mut o, &value(attached, &mut it, name)),
                 "root" => o.root = true,
                 "reset-system" => o.reset = true,
-                _ => { eprintln!("sandbox: unrecognized option '--{name}'"); usage() }
+                _ => {
+                    eprintln!("sandbox: unrecognized option '--{name}'");
+                    usage()
+                }
             }
             continue;
         }
@@ -160,21 +183,38 @@ pub fn parse(args: Vec<String>) -> Opts {
             let attached = (!rest.is_empty()).then_some(rest);
             let takes_value = matches!(c, 'w' | 'W' | 'r' | 'd' | 'b' | 'p');
             match c {
-                'h' => { print!("{}", help()); std::process::exit(0) }
+                'h' => {
+                    print!("{}", help());
+                    std::process::exit(0)
+                }
                 'i' => o.interactive = true,
                 'a' => o.app_box = true,
                 '6' => o.ipv6 = true,
                 'x' => o.x11 = true,
-                'n' => { o.net = true; o.out_if = attached; i = shorts.len(); continue } // -nIFACE: the rest is the interface
+                'n' => {
+                    o.net = true;
+                    o.out_if = attached;
+                    i = shorts.len();
+                    continue;
+                } // -nIFACE: the rest is the interface
                 'w' => o.binds.push(bind(false, &value(attached, &mut it, "w"))),
-                'W' => { let b = bind(false, &value(attached, &mut it, "W")); o.workdir = Some(b.real.clone()); o.binds.push(b) }
+                'W' => {
+                    let b = bind(false, &value(attached, &mut it, "W"));
+                    o.workdir = Some(b.real.clone());
+                    o.binds.push(b)
+                }
                 'r' => o.binds.push(bind(true, &value(attached, &mut it, "r"))),
                 'd' => o.chdir = Some(realpath_m(&PathBuf::from(value(attached, &mut it, "d")))),
                 'b' => o.box_ = Some(value(attached, &mut it, "b")),
                 'p' => permissions(&mut o, &value(attached, &mut it, "p")),
-                _ => { eprintln!("sandbox: invalid option -- '{c}'"); usage() }
+                _ => {
+                    eprintln!("sandbox: invalid option -- '{c}'");
+                    usage()
+                }
             }
-            if takes_value { break } // the value consumed the rest of the cluster
+            if takes_value {
+                break;
+            } // the value consumed the rest of the cluster
             i += 1;
         }
     }
@@ -193,7 +233,10 @@ fn permissions(o: &mut Opts, list: &str) {
             "camera" => o.camera = true,
             "x11" => o.x11 = true,
             "" => {}
-            other => die(2, format!("unknown permission: {other} (known: camera, x11)")),
+            other => die(
+                2,
+                format!("unknown permission: {other} (known: camera, x11)"),
+            ),
         }
     }
 }
