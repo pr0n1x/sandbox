@@ -25,7 +25,13 @@ impl Drop for Cleanup {
 }
 
 fn main() {
-    let opts = cli::parse(std::env::args().skip(1).collect());
+    let opts = match cli::parse(std::env::args().skip(1).collect()) {
+        Ok(o) => o,
+        Err(e) => {
+            e.report();
+            std::process::exit(e.exit_status_code())
+        }
+    };
     let home = home();
     let mut args: Vec<OsString> = Vec::new();
     let push =

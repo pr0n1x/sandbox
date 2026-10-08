@@ -279,6 +279,7 @@ pub fn shim_args(b: &BoxDir) -> Vec<OsString> {
 /// Before a plain mount: label everything unrecorded root's, real mode kept.
 /// A stamp keeps the pass to what changed since the last one.
 fn mark_root(b: &BoxDir) {
+    let _ = fs::create_dir_all(b.path.join(".work"));
     let stamp = b.path.join(".work/marked");
     let since = fs::metadata(&stamp)
         .ok()
@@ -346,6 +347,15 @@ fn rebuild_dpkg_status(b: &BoxDir) {
                 .collect()
         })
         .unwrap_or_default();
+    let tmp = db.join("status.tmp");
+    if fs::write(&tmp, merge_status(&host_status, &box_status, &box_pkgs)).is_ok() {
+        let _ = fs::rename(&tmp, db.join("status"));
+    }
+}
+
+/// The host's status with the box's paragraphs for `box_pkgs` replacing the
+/// host's, or appended in the box's order when the host has none.
+fn merge_status(host_status: &str, box_status: &str, box_pkgs: &HashSet<String>) -> String {
     // a paragraph's package as the two names its file list may have
     fn key(para: &str) -> (String, String) {
         let mut pkg = "";
@@ -369,7 +379,7 @@ fn rebuild_dpkg_status(b: &BoxDir) {
     };
     let mut own: HashMap<String, String> = HashMap::new();
     let mut order: Vec<String> = Vec::new(); // keep box paragraphs in their own order when appended
-    for p in paragraphs(&box_status) {
+    for p in paragraphs(box_status) {
         let (name, full) = key(&p);
         if box_pkgs.contains(&name) || box_pkgs.contains(&full) {
             if !own.contains_key(&full) {
@@ -379,7 +389,7 @@ fn rebuild_dpkg_status(b: &BoxDir) {
         }
     }
     let mut out = String::new();
-    for p in paragraphs(&host_status) {
+    for p in paragraphs(host_status) {
         let (_, full) = key(&p);
         match own.remove(&full) {
             Some(ours) => {
@@ -397,8 +407,173 @@ fn rebuild_dpkg_status(b: &BoxDir) {
             out += "\n\n";
         }
     }
-    let tmp = db.join("status.tmp");
-    if fs::write(&tmp, out).is_ok() {
-        let _ = fs::rename(&tmp, db.join("status"));
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn scratch(name: &str) -> PathBuf {
+        let d = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-tmp")
+            .join(format!("{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn box_naming() {
+        let d = scratch("box-naming");
+        let home = d.join("home/user");
+        let sb = home.join("sandboxes");
+        assert_eq!(resolve(None, false, None, &home).path, sb.join("default"));
+        assert_eq!(
+            resolve(Some("mybox"), false, None, &home).path,
+            sb.join("mybox")
+        );
+        let explicit = d.join("elsewhere/box");
+        assert_eq!(
+            resolve(Some(explicit.to_str().unwrap()), false, None, &home).path,
+            explicit
+        );
+        let app = Path::new("/usr/bin/foo");
+        assert_eq!(
+            resolve(None, true, Some(app), &home).path,
+            sb.join("usr-bin-foo")
+        );
+        // -b wins over -a; the sandbox home is <box>$HOME and gets created
+        let b = resolve(Some("named"), true, Some(app), &home);
+        assert_eq!(b.path, sb.join("named"));
+        assert_eq!(
+            b.home,
+            sb.join("named")
+                .join(home.strip_prefix("/").unwrap_or(&home))
+        );
+        assert!(b.home.is_dir());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn layer_detection_and_reset() {
+        let d = scratch("box-reset");
+        let b = resolve(
+            Some(d.join("box").to_str().unwrap()),
+            false,
+            None,
+            Path::new("/home/user"),
+        );
+        assert!(!has_layer(&b));
+        fs::create_dir_all(b.path.join("etc/opt")).unwrap();
+        fs::write(b.path.join("etc/opt/x"), "x").unwrap();
+        fs::create_dir_all(b.path.join(".work/usr/work")).unwrap();
+        fs::set_permissions(
+            b.path.join(".work/usr/work"),
+            fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+        fs::write(b.home.join("keep"), "k").unwrap();
+        assert!(has_layer(&b));
+        reset_system(&b);
+        assert!(!has_layer(&b));
+        assert!(!b.path.join(".work").exists());
+        assert_eq!(fs::read_to_string(b.home.join("keep")).unwrap(), "k");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn shim_is_written_and_bound() {
+        let d = scratch("box-shim");
+        let b = resolve(
+            Some(d.join("box").to_str().unwrap()),
+            false,
+            None,
+            Path::new("/home/user"),
+        );
+        let args = shim_args(&b);
+        assert_eq!(args[0], "--ro-bind");
+        assert_eq!(args[2], SHIM_INSIDE);
+        assert_eq!(
+            fs::read(b.path.join(".work/rootshim.so")).unwrap(),
+            ROOTSHIM
+        );
+        assert!(b.path.join("usr/lib/sandbox-rootshim.so").is_file()); // the mountpoint file
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn marking_labels_unrecorded_files_only() {
+        let d = scratch("box-mark");
+        let b = resolve(
+            Some(d.join("box").to_str().unwrap()),
+            false,
+            None,
+            Path::new("/home/user"),
+        );
+        fs::create_dir_all(b.path.join("usr/bin")).unwrap();
+        let installed = b.path.join("usr/bin/tool");
+        fs::write(&installed, "x").unwrap();
+        fs::set_permissions(&installed, fs::Permissions::from_mode(0o755)).unwrap();
+        let apps_own = b.path.join("usr/bin/mine");
+        fs::write(&apps_own, "y").unwrap();
+        set_xattr(&apps_own, OWNER_XATTR, "1000:1000:100644").unwrap();
+        mark_root(&b);
+        let rec = |p: &Path| {
+            let mut buf = vec![0u8; 64];
+            let n = unsafe {
+                libc::lgetxattr(
+                    std::ffi::CString::new(p.to_str().unwrap())
+                        .unwrap()
+                        .as_ptr(),
+                    c"user.containers.override_stat".as_ptr(),
+                    buf.as_mut_ptr().cast(),
+                    buf.len(),
+                )
+            };
+            String::from_utf8_lossy(&buf[..n.max(0) as usize]).into_owned()
+        };
+        assert_eq!(rec(&installed), "0:0:100755");
+        assert_eq!(
+            rec(&b.path.join("usr/bin")),
+            format!(
+                "0:0:{:o}",
+                fs::metadata(b.path.join("usr/bin")).unwrap().mode()
+            )
+        );
+        assert_eq!(rec(&apps_own), "1000:1000:100644"); // untouched
+        assert!(b.path.join(".work/marked").exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn status_merge() {
+        let host = "Package: bash\nStatus: install ok installed\nArchitecture: amd64\n\n\
+                    Package: libc6\nStatus: install ok installed\nArchitecture: i386\n\n\
+                    Package: diag.plugin\nStatus: deinstall ok config-files\nArchitecture: amd64\n";
+        let boxs = "Package: bash\nStatus: deinstall ok config-files\nArchitecture: amd64\n\n\
+                    Package: diag.plugin\nStatus: install ok installed\nArchitecture: amd64\n\n\
+                    Package: gosuslugi-plugin\nStatus: install ok installed\nArchitecture: amd64\n\n\
+                    Package: libc6\nStatus: install ok installed\nArchitecture: i386\n";
+        let box_pkgs: HashSet<String> = ["diag.plugin", "gosuslugi-plugin"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let merged = merge_status(host, boxs, &box_pkgs);
+        let paras: Vec<&str> = merged.split("\n\n").filter(|p| !p.is_empty()).collect();
+        assert_eq!(paras.len(), 4);
+        // host entries win for packages the box didn't install (bash's stale copy is dropped)
+        assert!(paras[0].starts_with("Package: bash\nStatus: install ok installed"));
+        assert!(paras[1].starts_with("Package: libc6"));
+        // the box's record replaces the host's for a box-installed package
+        assert!(paras[2].starts_with("Package: diag.plugin\nStatus: install ok installed"));
+        // and is appended when the host has none
+        assert!(paras[3].starts_with("Package: gosuslugi-plugin"));
+        assert!(merged.ends_with("\n\n"));
+        // foreign-arch file lists are named pkg:arch
+        let only_i386: HashSet<String> = ["libc6:i386".to_string()].into();
+        let m = merge_status(host, boxs, &only_i386);
+        assert!(m.contains("Package: libc6\nStatus: install ok installed\nArchitecture: i386"));
     }
 }

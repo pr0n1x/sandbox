@@ -221,15 +221,10 @@ pub fn run(
     // the first status message arrives once the namespaces exist; it also
     // carries namespace inode numbers, so pick the child-pid field specifically
     let line = read_line_timeout(status_r, Duration::from_secs(10)).unwrap_or_default();
-    let child_pid: i32 = line
-        .split("\"child-pid\":")
-        .nth(1)
-        .and_then(|s| s.trim_start().split(|c: char| !c.is_ascii_digit()).next())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| {
-            kill_all(&[child.id() as i32]);
-            die(1, "bwrap did not report a child pid")
-        });
+    let child_pid = parse_child_pid(&line).unwrap_or_else(|| {
+        kill_all(&[child.id() as i32]);
+        die(1, "bwrap did not report a child pid")
+    });
 
     let mut pasta = vec!["--config-net".to_string(), "--quiet".into()];
     pasta.extend(net.pasta_ip.iter().cloned());
@@ -328,6 +323,14 @@ pub fn run(
     exit_code(status)
 }
 
+/// The "child-pid" field of bwrap's JSON status line.
+fn parse_child_pid(line: &str) -> Option<i32> {
+    line.split("\"child-pid\":")
+        .nth(1)
+        .and_then(|s| s.trim_start().split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|s| s.parse().ok())
+}
+
 /// Read one line from a pipe, giving up after `timeout`.
 fn read_line_timeout(fd: OwnedFd, timeout: Duration) -> Option<String> {
     let mut f = fs::File::from(fd);
@@ -357,5 +360,72 @@ fn read_line_timeout(fd: OwnedFd, timeout: Duration) -> Option<String> {
             Ok(_) => line.push(b[0]),
             Err(_) => return None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn defaults_without_an_interface() {
+        let n = configure(None, false);
+        assert_eq!(n.pasta_ip, ["-4"]);
+        assert!(n.out_args.is_empty());
+        assert_eq!(n.fwd_args, ["--dns-forward", "169.254.1.1"]);
+        assert_eq!(n.dns_fwd, "169.254.1.1");
+        assert!(configure(None, true).pasta_ip.is_empty());
+    }
+
+    #[test]
+    fn child_pid_from_status_line() {
+        assert_eq!(
+            parse_child_pid(r#"{ "child-pid": 4242, "ns": 1 }"#),
+            Some(4242)
+        );
+        assert_eq!(parse_child_pid(r#"{"child-pid":7}"#), Some(7));
+        assert_eq!(parse_child_pid(r#"{ "exit-code": 0 }"#), None);
+        assert_eq!(parse_child_pid(""), None);
+    }
+
+    #[test]
+    fn exit_codes_like_a_shell() {
+        assert_eq!(exit_code(std::process::ExitStatus::from_raw(0)), 0);
+        assert_eq!(exit_code(std::process::ExitStatus::from_raw(3 << 8)), 3);
+        assert_eq!(
+            exit_code(std::process::ExitStatus::from_raw(libc::SIGTERM)),
+            143
+        );
+    }
+
+    #[test]
+    fn pipes_are_inheritable_on_the_child_side() {
+        let p = Pipes::new();
+        let flags = |fd: &OwnedFd| unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+        for child_end in [&p.status_w, &p.block_r, &p.resolv_r] {
+            assert_eq!(flags(child_end) & libc::FD_CLOEXEC, 0);
+        }
+        for our_end in [&p.status_r, &p.block_w, &p.resolv_w] {
+            assert_ne!(flags(our_end) & libc::FD_CLOEXEC, 0);
+        }
+    }
+
+    #[test]
+    fn line_with_and_without_data() {
+        let (r, w) = pipe();
+        fs::File::from(w).write_all(b"hello\nrest").unwrap();
+        assert_eq!(
+            read_line_timeout(r, Duration::from_secs(1)).as_deref(),
+            Some("hello")
+        );
+        let (r, _w) = pipe(); // nothing ever written: times out
+        assert_eq!(read_line_timeout(r, Duration::from_millis(50)), None);
+        let (r, w) = pipe(); // EOF without a newline still yields the data
+        fs::File::from(w).write_all(b"partial").unwrap();
+        assert_eq!(
+            read_line_timeout(r, Duration::from_secs(1)).as_deref(),
+            Some("partial")
+        );
     }
 }

@@ -199,3 +199,76 @@ pub fn gid() -> u32 {
 pub fn home() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| die(1, "HOME is not set")))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let d = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-tmp")
+            .join(format!("{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn absolute_normalizes_lexically() {
+        assert_eq!(absolute(Path::new("/a/../b/./c")), PathBuf::from("/b/c"));
+        assert_eq!(absolute(Path::new("/../x")), PathBuf::from("/x"));
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(absolute(Path::new("rel/../y")), cwd.join("y"));
+    }
+
+    #[test]
+    fn realpath_m_resolves_the_existing_part() {
+        let d = scratch("util-realpath");
+        let real = d.canonicalize().unwrap();
+        assert_eq!(
+            realpath_m(&d.join("missing/deeper")),
+            real.join("missing/deeper")
+        );
+        let link = d.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(realpath_m(&link.join("new")), real.join("new"));
+        assert!(realpath_e(&d.join("missing")).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn mount_escapes() {
+        assert_eq!(unescape_mount("/a\\040b"), PathBuf::from("/a b"));
+        assert_eq!(unescape_mount("/plain"), PathBuf::from("/plain"));
+        assert_eq!(unescape_mount("/end\\"), PathBuf::from("/end\\"));
+    }
+
+    #[test]
+    fn mountpoints() {
+        assert!(is_mountpoint(Path::new("/proc")));
+        assert!(!is_mountpoint(Path::new("/proc/self")));
+        assert!(has_mounts_under(Path::new("/")));
+        let d = scratch("util-mounts");
+        assert!(!has_mounts_under(&d));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn which_finds_executables() {
+        assert!(which("sh").is_some());
+        assert_eq!(which("/bin/sh"), Some(PathBuf::from("/bin/sh")));
+        assert!(which("surely-no-such-program-here").is_none());
+        assert!(which("/etc/hostname").is_none()); // exists but not executable
+    }
+
+    #[test]
+    fn xattrs_roundtrip() {
+        let d = scratch("util-xattr");
+        let f = d.join("f");
+        fs::write(&f, "x").unwrap();
+        assert!(!has_xattr(&f, "user.test"));
+        set_xattr(&f, "user.test", "0:0:100644").unwrap();
+        assert!(has_xattr(&f, "user.test"));
+        let _ = fs::remove_dir_all(&d);
+    }
+}
