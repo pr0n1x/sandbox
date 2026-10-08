@@ -80,7 +80,7 @@ fn main() {
             "--dir".into(),
             dir.into(),
             "--ro-bind-data".into(),
-            p.resolv_r.as_raw_fd().to_string().into(),
+            p.resolv.read.as_raw_fd().to_string().into(),
             resolv.into(),
         ]);
     }

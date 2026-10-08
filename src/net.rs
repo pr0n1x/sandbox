@@ -14,43 +14,72 @@ use std::process::{Child, Command};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
+/// A pipe, both ends close-on-exec as Rust makes everything it opens.
+pub struct Pipe {
+    pub read: OwnedFd,
+    pub write: OwnedFd,
+}
+
+impl Pipe {
+    pub fn new() -> Pipe {
+        let mut fds = [0; 2];
+        // SAFETY: valid array
+        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
+            die(1, format!("pipe: {}", std::io::Error::last_os_error()));
+        }
+        // SAFETY: fresh fds we own
+        unsafe {
+            Pipe {
+                read: OwnedFd::from_raw_fd(fds[0]),
+                write: OwnedFd::from_raw_fd(fds[1]),
+            }
+        }
+    }
+
+    /// Let a child inherit `end` across exec (clears close-on-exec on it).
+    fn inherit(end: &OwnedFd) {
+        // SAFETY: a valid fd we own
+        if unsafe { libc::fcntl(end.as_raw_fd(), libc::F_SETFD, 0) } < 0 {
+            die(1, format!("fcntl: {}", std::io::Error::last_os_error()));
+        }
+    }
+
+    /// A pipe the child reads from.
+    pub fn to_child() -> Pipe {
+        let p = Pipe::new();
+        Pipe::inherit(&p.read);
+        p
+    }
+
+    /// A pipe the child writes to.
+    pub fn from_child() -> Pipe {
+        let p = Pipe::new();
+        Pipe::inherit(&p.write);
+        p
+    }
+}
+
 /// The pipes bwrap is handed, created before its argument list is built so
-/// their numbers can go into it. The child-side ends are inheritable (not
-/// close-on-exec, which Rust sets on everything it opens); the parent drops
-/// them right after spawning bwrap, so later children (pasta, nsenter)
-/// don't get them.
+/// their numbers can go into it. Only the child-side ends are inheritable;
+/// the parent drops them right after spawning bwrap, so later children
+/// (pasta, nsenter) don't get them.
 pub struct Pipes {
     /// `--json-status-fd`: bwrap reports the sandbox's pid here once the
     /// namespaces exist
-    pub status_r: OwnedFd,
-    pub status_w: OwnedFd,
+    pub status: Pipe,
     /// `--block-fd`: bwrap reads this before starting the app — the read
     /// blocks until we write a byte, once pasta has set the network up
-    pub block_r: OwnedFd,
-    pub block_w: OwnedFd,
+    pub block: Pipe,
     /// `--ro-bind-data`: the resolv.conf contents
-    pub resolv_r: OwnedFd,
-    pub resolv_w: OwnedFd,
+    pub resolv: Pipe,
 }
 
 impl Pipes {
     pub fn new() -> Pipes {
-        let (status_r, status_w) = pipe();
-        let (block_r, block_w) = pipe();
-        let (resolv_r, resolv_w) = pipe();
-        for child_end in [&status_w, &block_r, &resolv_r] {
-            // SAFETY: a valid fd we own
-            if unsafe { libc::fcntl(child_end.as_raw_fd(), libc::F_SETFD, 0) } < 0 {
-                die(1, format!("fcntl: {}", std::io::Error::last_os_error()));
-            }
-        }
         Pipes {
-            status_r,
-            status_w,
-            block_r,
-            block_w,
-            resolv_r,
-            resolv_w,
+            status: Pipe::from_child(),
+            block: Pipe::to_child(),
+            resolv: Pipe::to_child(),
         }
     }
 }
@@ -153,16 +182,6 @@ pub fn forward_signals_to(child: &Child) {
     }
 }
 
-fn pipe() -> (OwnedFd, OwnedFd) {
-    let mut fds = [0; 2];
-    // SAFETY: valid array
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
-        die(1, format!("pipe: {}", std::io::Error::last_os_error()));
-    }
-    // SAFETY: fresh fds we own
-    unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) }
-}
-
 /// Exit status of a finished child as a shell would report it.
 pub fn exit_code(status: std::process::ExitStatus) -> i32 {
     use std::os::unix::process::ExitStatusExt;
@@ -183,23 +202,20 @@ pub fn run(
     pipes: Pipes,
 ) -> i32 {
     let Pipes {
-        status_r,
-        status_w,
-        block_r,
-        block_w,
-        resolv_r,
-        resolv_w,
+        status,
+        block,
+        resolv,
     } = pipes;
     {
-        let mut w = fs::File::from(resolv_w);
+        let mut w = fs::File::from(resolv.write);
         let _ = writeln!(w, "nameserver {}", net.dns_fwd);
     } // closed: bwrap reads the data up to EOF
 
     let mut child = Command::new("bwrap")
         .arg("--json-status-fd")
-        .arg(status_w.as_raw_fd().to_string())
+        .arg(status.write.as_raw_fd().to_string())
         .arg("--block-fd")
-        .arg(block_r.as_raw_fd().to_string())
+        .arg(block.read.as_raw_fd().to_string())
         .args(bwrap_args)
         .args(app_wrap)
         .arg(app)
@@ -207,9 +223,10 @@ pub fn run(
         .spawn()
         .unwrap_or_else(|e| die(1, format!("cannot run bwrap: {e}")));
     forward_signals_to(&child);
-    drop(status_w);
-    drop(block_r);
-    drop(resolv_r);
+    // the child's ends: it has them, nobody spawned later should
+    drop(status.write);
+    drop(block.read);
+    drop(resolv.read);
     let kill_all = |pids: &[i32]| {
         for p in pids {
             if *p > 0 {
@@ -220,7 +237,7 @@ pub fn run(
 
     // the first status message arrives once the namespaces exist; it also
     // carries namespace inode numbers, so pick the child-pid field specifically
-    let line = read_line_timeout(status_r, Duration::from_secs(10)).unwrap_or_default();
+    let line = read_line_timeout(status.read, Duration::from_secs(10)).unwrap_or_default();
     let child_pid = parse_child_pid(&line).unwrap_or_else(|| {
         kill_all(&[child.id() as i32]);
         die(1, "bwrap did not report a child pid")
@@ -268,7 +285,7 @@ pub fn run(
 
     let outer_ns = fs::read_link(format!("/proc/{child_pid}/ns/user")).ok();
     // network is up; release the app
-    let _ = fs::File::from(block_w).write_all(b"\n");
+    let _ = fs::File::from(block.write).write_all(b"\n");
 
     // the released app (see APP_WRAP in main) now unshares its nested userns
     // and waits; once that shows up, write the 0 -> real uid/gid mapping from
@@ -403,28 +420,28 @@ mod tests {
     fn pipes_are_inheritable_on_the_child_side() {
         let p = Pipes::new();
         let flags = |fd: &OwnedFd| unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
-        for child_end in [&p.status_w, &p.block_r, &p.resolv_r] {
+        for child_end in [&p.status.write, &p.block.read, &p.resolv.read] {
             assert_eq!(flags(child_end) & libc::FD_CLOEXEC, 0);
         }
-        for our_end in [&p.status_r, &p.block_w, &p.resolv_w] {
+        for our_end in [&p.status.read, &p.block.write, &p.resolv.write] {
             assert_ne!(flags(our_end) & libc::FD_CLOEXEC, 0);
         }
     }
 
     #[test]
     fn line_with_and_without_data() {
-        let (r, w) = pipe();
-        fs::File::from(w).write_all(b"hello\nrest").unwrap();
+        let p = Pipe::new();
+        fs::File::from(p.write).write_all(b"hello\nrest").unwrap();
         assert_eq!(
-            read_line_timeout(r, Duration::from_secs(1)).as_deref(),
+            read_line_timeout(p.read, Duration::from_secs(1)).as_deref(),
             Some("hello")
         );
-        let (r, _w) = pipe(); // nothing ever written: times out
-        assert_eq!(read_line_timeout(r, Duration::from_millis(50)), None);
-        let (r, w) = pipe(); // EOF without a newline still yields the data
-        fs::File::from(w).write_all(b"partial").unwrap();
+        let p = Pipe::new(); // nothing ever written: times out
+        assert_eq!(read_line_timeout(p.read, Duration::from_millis(50)), None);
+        let p = Pipe::new(); // EOF without a newline still yields the data
+        fs::File::from(p.write).write_all(b"partial").unwrap();
         assert_eq!(
-            read_line_timeout(r, Duration::from_secs(1)).as_deref(),
+            read_line_timeout(p.read, Duration::from_secs(1)).as_deref(),
             Some("partial")
         );
     }
