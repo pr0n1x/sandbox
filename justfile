@@ -4,6 +4,8 @@ alias f := fmt
 alias l := lint
 alias t := test
 alias p := prepare
+alias b := build
+alias r := release
 
 help:
     @just --list
@@ -35,6 +37,14 @@ test:
     CARGO_WORKSPACE_PATH="{{justfile_directory()}}" cargo t
 
 prepare: check lint test
+
+build:
+    @echo "Building debug"
+    cargo b
+
+release:
+    @echo "Building release"
+    cargo b -r
 
 clean:
     @echo "Running cargo clean"

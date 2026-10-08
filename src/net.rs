@@ -4,7 +4,7 @@
 //! The app is held on bwrap's --block-fd until pasta has configured the
 //! network.
 
-use crate::util::{die, output, run as run_tool, warn};
+use crate::util::{die, output, run as run_tool};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
@@ -21,7 +21,7 @@ pub struct Pipe {
 }
 
 impl Pipe {
-    pub fn new() -> Pipe {
+    fn new() -> Pipe {
         let mut fds = [0; 2];
         // SAFETY: valid array
         if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
@@ -45,14 +45,14 @@ impl Pipe {
     }
 
     /// A pipe the child reads from.
-    pub fn to_child() -> Pipe {
+    fn to_child() -> Pipe {
         let p = Pipe::new();
         Pipe::inherit(&p.read);
         p
     }
 
     /// A pipe the child writes to.
-    pub fn from_child() -> Pipe {
+    fn from_child() -> Pipe {
         let p = Pipe::new();
         Pipe::inherit(&p.write);
         p
@@ -66,10 +66,10 @@ impl Pipe {
 pub struct Pipes {
     /// `--json-status-fd`: bwrap reports the sandbox's pid here once the
     /// namespaces exist
-    pub status: Pipe,
+    status: Pipe,
     /// `--block-fd`: bwrap reads this before starting the app — the read
     /// blocks until we write a byte, once pasta has set the network up
-    pub block: Pipe,
+    block: Pipe,
     /// `--ro-bind-data`: the resolv.conf contents
     pub resolv: Pipe,
 }
@@ -86,12 +86,12 @@ impl Pipes {
 
 pub struct Net {
     /// -4, or nothing with -6 (pasta's defaults are both)
-    pub pasta_ip: Vec<String>,
+    pasta_ip: Vec<String>,
     /// -nIFACE: mirror IFACE inside and pin pasta's sockets to it
-    pub out_args: Vec<String>,
+    out_args: Vec<String>,
     /// DNS forwarding: pasta's resolver address inside, and how it forwards
-    pub fwd_args: Vec<String>,
-    pub dns_fwd: String,
+    fwd_args: Vec<String>,
+    dns_fwd: String,
 }
 
 pub fn configure(out_if: Option<&str>, ipv6: bool) -> Net {
@@ -283,56 +283,12 @@ pub fn run(
         .stderr(std::process::Stdio::null())
         .status();
 
-    let outer_ns = fs::read_link(format!("/proc/{child_pid}/ns/user")).ok();
+    let sandbox_ns = crate::unroot::namespace_of(child_pid);
     // network is up; release the app
     let _ = fs::File::from(block.write).write_all(b"\n");
-
-    // the released app (see APP_WRAP in main) now unshares its nested userns
-    // and waits; once that shows up, write the 0 -> real uid/gid mapping from
-    // here. The app is a child of bwrap's mini-init (child_pid, still in the
-    // outer ns). nsenter into the outer ns first (via the init): the maps may
-    // only be written from the nested ns's parent userns, and the host is the
-    // grandparent. As the outer ns owns the nested one, joining it grants the
-    // needed caps, and a single line mapping one's own euid/egid is always allowed
+    // the released app now creates its nested userns and waits for its map
     if !app_wrap.is_empty() {
-        let mut mapped = false;
-        let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(5) {
-            if !Path::new(&format!("/proc/{child_pid}")).exists() {
-                break; // app already gone
-            }
-            let app_pid =
-                fs::read_to_string(format!("/proc/{child_pid}/task/{child_pid}/children"))
-                    .ok()
-                    .and_then(|s| s.split_whitespace().next().map(str::to_string));
-            if let Some(app_pid) = app_pid {
-                let ns = fs::read_link(format!("/proc/{app_pid}/ns/user")).ok();
-                if ns.is_some() && ns != outer_ns {
-                    let script = format!(
-                        "echo deny > /proc/{app_pid}/setgroups && echo '{} 0 1' > /proc/{app_pid}/gid_map && echo '{} 0 1' > /proc/{app_pid}/uid_map",
-                        crate::util::gid(), crate::util::uid()
-                    );
-                    mapped = Command::new("nsenter")
-                        .args([
-                            "--preserve-credentials",
-                            "-U",
-                            "-t",
-                            &child_pid.to_string(),
-                            "sh",
-                            "-c",
-                            &script,
-                        ])
-                        .status()
-                        .map(|s| s.success())
-                        .unwrap_or(false);
-                    break;
-                }
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        if !mapped {
-            warn("setting the app's uid map failed; it runs as nobody");
-        }
+        crate::unroot::map_or_warn(child_pid, sandbox_ns.as_deref());
     }
     let status = child
         .wait()

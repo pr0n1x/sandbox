@@ -12,7 +12,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 /// The system dirs that get a layer.
-pub const LAYERED: [&str; 4] = ["usr", "etc", "opt", "var"];
+const LAYERED: [&str; 4] = ["usr", "etc", "opt", "var"];
 
 /// fuse-overlayfs' ownership record (xattr_permissions=2): "uid:gid:mode"
 const OWNER_XATTR: &str = "user.containers.override_stat";
@@ -24,7 +24,7 @@ static ROOTSHIM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rootshim.so")
 pub const SHIM_INSIDE: &str = "/usr/lib/sandbox-rootshim.so";
 
 pub struct BoxDir {
-    pub path: PathBuf,
+    path: PathBuf,
     /// `<box>$HOME`, bound as the sandbox $HOME
     pub home: PathBuf,
 }

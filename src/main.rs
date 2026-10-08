@@ -5,6 +5,7 @@
 mod boxdir;
 mod cli;
 mod net;
+mod unroot;
 mod util;
 
 use std::ffi::OsString;
@@ -214,20 +215,10 @@ fn main() {
         }
     }
 
-    // -n maps the real uid to 0 (for pasta), which would leave the app running
-    // as root with every user-owned file shown as root:root. Undo that for the
-    // app itself unless --root asks for root: nest a second userns mapping 0
-    // back to the real uid/gid, so ownership looks normal again (like podman
-    // unshare in reverse). Ubuntu's userns restriction strips capabilities
-    // from the creator (the app can't write its own uid_map), so the app just
-    // waits for the mapping while we write it from outside — joining/holding
-    // a userns isn't gated, only creating one. Snaps keep the fake root: their
-    // nested userns is forbidden
+    // -n maps the real uid to 0 (for pasta); un-root the app again unless
+    // --root asks for root or it's a snap (see unroot.rs)
     let app_wrap: Vec<String> = if opts.net && !snap && !opts.root {
-        vec![
-            "unshare".into(), "-U".into(), "sh".into(), "-c".into(),
-            "n=0; while [ \"$(id -u)\" = 65534 ]; do [ \"$((n+=1))\" -lt 100 ] || { echo 'sandbox: no uid map after 5s' >&2; exit 1; }; sleep 0.05; done; exec \"$0\" \"$@\"".into(),
-        ]
+        unroot::wrapper()
     } else {
         Vec::new()
     };

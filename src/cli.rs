@@ -49,10 +49,10 @@ impl CliError {
     }
 }
 
-pub const USAGE: &str = "usage: sandbox [-i|--interactive] [-w|--bind DIR]... [-W|--workdir DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-b|--box NAME|DIR] [-a|--app-box] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] [-p|--permissions LIST]... [--root] /usr/bin/someapp [args...]
+const USAGE: &str = "usage: sandbox [-i|--interactive] [-w|--bind DIR]... [-W|--workdir DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-b|--box NAME|DIR] [-a|--app-box] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] [-p|--permissions LIST]... [--root] /usr/bin/someapp [args...]
        sandbox [-b NAME|DIR] --reset-system";
 
-pub fn help() -> String {
+fn help() -> String {
     let user = std::env::var("USER").unwrap_or_else(|_| "user".into());
     format!(
         "usage: sandbox [options] /usr/bin/someapp [args...]
