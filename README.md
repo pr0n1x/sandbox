@@ -8,9 +8,6 @@ that you don't fully trust.
 
 ## Building and installing
 
-`sandbox` is a single Rust binary; `rootshim.c` (see `--root`) is compiled
-by the build script and embedded, so nothing but the binary needs installing:
-
 ```sh
 cargo build --release          # needs cargo and a C compiler
 ln -s "$PWD/target/release/sandbox" ~/bin/sandbox
@@ -54,11 +51,17 @@ ln -s "$PWD/target/release/sandbox" ~/bin/sandbox
 - **No terminal control** by default (`--new-session`).
 - **Snap binaries** (app path under `/snap`, e.g.
   `` sandbox "$(realpath /snap/firefox/current/usr/lib/firefox/firefox)" ``):
-  `/snap` is bound read-only and nested user namespaces are forbidden
-  (`--disable-userns`). Run outside snapd, the binary uses the host's libs;
-  the userns ban makes apps whose snap build crashes on its own
-  namespace sandbox (Firefox: every content process segfaults) fall back
-  cleanly, as under Flatpak.
+  the binary runs without snapd, with `/snap` bound read-only. For these
+  `sandbox` passes bwrap `--disable-userns`, which forbids the app to create
+  user namespaces, for this reason: Ubuntu strips every capability from a
+  user namespace an unprivileged program creates, so such a namespace is
+  useless; Firefox's snap build creates one anyway for each tab process,
+  then fails inside it and every tab crashes. `--disable-userns` makes the
+  creation fail instead, and Firefox handles that case: it prints
+  `CanCreateUserNamespace() clone() failure` once at startup and runs its
+  tabs without that layer, as it does under Flatpak. Under `-n` the bwrap
+  option would get in pasta's way, so the same ban is applied with the
+  sysctl `user.max_user_namespaces=0` once the network is up.
 
 ## Usage
 
