@@ -320,6 +320,33 @@ cleanup() {
 }
 trap cleanup EXIT
 OWNER_XATTR=user.containers.override_stat   # fuse-overlayfs' record (xattr_permissions=2): "uid:gid:mode"
+# dpkg's status file is one file, so the first dpkg run in the box copies
+# the host's up and the copy then shadows it: packages the host installs or
+# upgrades later look missing inside. Rebuild it before mounting, when no
+# sandbox has the box mounted: the host's current status, with the
+# paragraphs of the packages the box installed itself (those have a file
+# list in the box's info/) replacing or appended
+rebuild_dpkg_status() {
+  local DB="$BOX/var/lib/dpkg"
+  [ -f "$DB/status" ] || return 0
+  ls "$DB/info"/*.list 2>/dev/null | sed 's|.*/||; s|\.list$||' > "$BOX/.work/box-pkgs"
+  awk -v RS= -v ORS='\n\n' -v boxlist="$BOX/.work/box-pkgs" -v boxstatus="$DB/status" '
+    # a paragraph`s package as the two names its file list may have: "pkg" and "pkg:arch"
+    function key(p,  n, i, l, pk, ar) {
+      n = split(p, l, "\n"); pk = ""; ar = ""
+      for (i = 1; i <= n; i++) { if (l[i] ~ /^Package: /) pk = substr(l[i], 10); if (l[i] ~ /^Architecture: /) ar = substr(l[i], 15) }
+      return pk SUBSEP pk ":" ar
+    }
+    BEGIN {
+      RS = "\n"   # the name list is one name per line (RS="" would read it as one paragraph)
+      while ((getline l < boxlist) > 0) box[l] = 1
+      RS = ""      # paragraphs again, for the box status here and the host status that follows
+      while ((getline p < boxstatus) > 0) { split(key(p), k, SUBSEP); if (k[1] in box || k[2] in box) para[k[2]] = p }
+    }
+    { split(key($0), k, SUBSEP); if (k[2] in para) { print para[k[2]]; delete para[k[2]] } else print }
+    END { for (k in para) print para[k] }
+  ' /var/lib/dpkg/status > "$DB/status.tmp" && mv "$DB/status.tmp" "$DB/status"
+}
 # before a plain mount: label everything unrecorded root's, real mode kept
 mark_root() {
   local STAMP="$BOX/.work/marked" F NEWER=()
@@ -360,6 +387,8 @@ if [ -n "$LAYER" ]; then
   for F in var/lib/dpkg/lock var/lib/dpkg/lock-frontend var/lib/dpkg/triggers/Lock var/lib/apt/lists/lock var/cache/apt/archives/lock; do
     [ -e "/$F" ] && [ ! -r "/$F" ] && [ ! -e "$BOX/$F" ] && { mkdir -p "$BOX/${F%/*}"; : > "$BOX/$F"; }
   done
+  mkdir -p "$BOX/.work"
+  mountpoint -q "$BOX/.mnt/user/var" || mountpoint -q "$BOX/.mnt/root/var" || rebuild_dpkg_status
   [ -n "$ROOT" ] || mark_root
   for DIR in /usr /etc /opt /var; do layer "$DIR"; done
 else

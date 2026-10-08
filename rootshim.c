@@ -11,10 +11,18 @@
  * rwx for directories, rw for files. Nothing else changes; the installer's
  * own chmod to the final mode still happens (with the same bits kept).
  *
+ * It also makes chown to a uid or gid the sandbox doesn't have succeed.
+ * Only your own uid is mapped into the sandbox (as root), so the kernel
+ * rejects any other id with EINVAL — and tar, dpkg-deb, cp -a and
+ * install all restore ownership when run as root. The file simply stays
+ * yours, which is the only ownership it could have here; the plain view
+ * shows installed files as root's anyway.
+ *
  *   cc -shared -fPIC -O2 -o rootshim.so rootshim.c
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
 #include <sys/stat.h>
@@ -106,4 +114,37 @@ int fchmodat(int dirfd, const char *path, mode_t mode, int flags)
 	struct stat st;
 	if (!next) next = real("fchmodat");
 	return next(dirfd, path, keep_bits(mode, fstatat(dirfd, path, &st, flags) == 0 && S_ISDIR(st.st_mode)), flags);
+}
+
+/* --- ownership changes ------------------------------------------------ */
+
+/* EINVAL from chown means the id isn't mapped in our user namespace */
+static int unmapped(int rc) { return rc < 0 && errno == EINVAL ? 0 : rc; }
+
+int chown(const char *path, uid_t uid, gid_t gid)
+{
+	static int (*next)(const char *, uid_t, gid_t);
+	if (!next) next = real("chown");
+	return unmapped(next(path, uid, gid));
+}
+
+int lchown(const char *path, uid_t uid, gid_t gid)
+{
+	static int (*next)(const char *, uid_t, gid_t);
+	if (!next) next = real("lchown");
+	return unmapped(next(path, uid, gid));
+}
+
+int fchown(int fd, uid_t uid, gid_t gid)
+{
+	static int (*next)(int, uid_t, gid_t);
+	if (!next) next = real("fchown");
+	return unmapped(next(fd, uid, gid));
+}
+
+int fchownat(int dirfd, const char *path, uid_t uid, gid_t gid, int flags)
+{
+	static int (*next)(int, const char *, uid_t, gid_t, int);
+	if (!next) next = real("fchownat");
+	return unmapped(next(dirfd, path, uid, gid, flags));
 }

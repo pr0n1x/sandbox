@@ -168,21 +168,28 @@ sandbox.sh [options] --install PKG.deb... [dpkg options]
   installer can edit, replace, hard-link and chown-to-root anything it can
   read — `dpkg -i`, `apt-get install ./pkg.deb`, vendor `install.sh`
   scripts work, maintainer scripts included, and `/var/lib/dpkg` is the
-  host's database with the box's changes layered on top. Limits: host files
-  only root can read (`/etc/shadow`, other users' data) stay unreadable and
-  so can't be copied up or replaced — nothing unprivileged can change that;
-  and `chown` to any uid but your own fails with EINVAL, since the sandbox
-  maps a single uid (packages shipping files owned by `_apt`, `man` etc.
-  need `--force-...`-style workarounds or a fix-up). dpkg's and apt's lock
-  files are root-only on the host, so the box gets empty shadows of them.
-  Anything a package installs shadows the host's version from then on, host
-  upgrades included (e.g. `ld.so.cache` after a postinst runs `ldconfig`).
+  host's database with the box's changes layered on top — its `status`
+  file is rebuilt at every start from the host's current one plus the
+  packages the box installed, so host installs and upgrades show up inside
+  (a copied-up `status` would otherwise shadow the host's forever). The one hard
+  limit: host files only root can read (`/etc/shadow`, other users' data)
+  stay unreadable and so can't be copied up, replaced or even deleted
+  (fuse-overlayfs copies a file up before whiting it out) — nothing
+  unprivileged can change that; purge such leftovers on the host. dpkg's
+  and apt's lock files are root-only on the host, so the box gets empty
+  shadows of them. Anything a package installs shadows the host's version
+  from then on, host upgrades included (e.g. `ld.so.cache` after a postinst
+  runs `ldconfig`).
   `--root` runs preload `rootshim.so` (build it once with `make`; without
-  it `--root` warns): neither fake root nor the FUSE daemon has
-  capabilities, so a directory created with mode 000 — dpkg does that for
-  every directory, chmodding later — can't be opened by the daemon to
-  finish the mkdir; the shim keeps the owner's bits in every mode an
-  installer sets (`rwx` on directories, `rw` on files; see `rootshim.c`).
+  it `--root` warns), which papers over two consequences of "root" being a
+  bare uid without capabilities, see `rootshim.c`: a directory created with
+  mode 000 — dpkg does that for every directory, chmodding later — can't be
+  opened by the FUSE daemon to finish the mkdir, so the shim keeps the
+  owner's bits in every mode an installer sets (`rwx` on directories, `rw`
+  on files); and `chown` to any uid but your own fails with EINVAL, since
+  the sandbox maps a single uid — tar, `dpkg-deb`, `cp -a` and `install`
+  all restore ownership when run as root — so the shim reports success
+  and the file stays yours, which the plain view shows as root's anyway.
   Statically linked programs and ones AppArmor confines separately (Ubuntu
   ships a profile for `who`, which prints a harmless "cannot be preloaded"
   when a postinst calls it) run without it. No short option on purpose.
