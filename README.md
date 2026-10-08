@@ -6,9 +6,19 @@ no network, and a private home directory — without giving the app access to
 the real `$HOME`. Useful for apps installed system-wide (e.g. from a `.deb`)
 that you don't fully trust.
 
+## Building and installing
+
+`sandbox` is a single Rust binary; `rootshim.c` (see `--root`) is compiled
+by the build script and embedded, so nothing but the binary needs installing:
+
+```sh
+cargo build --release          # needs cargo and a C compiler
+ln -s "$PWD/target/release/sandbox" ~/bin/sandbox
+```
+
 ## What it does
 
-`sandbox.sh` launches the app with:
+`sandbox` launches the app with:
 
 - **Own user / PID / IPC / UTS / network namespaces** (`--unshare-all`) —
   the network namespace contains only loopback, so by default the app has no
@@ -53,9 +63,8 @@ that you don't fully trust.
 ## Usage
 
 ```sh
-sandbox.sh [-i|--interactive] [-w|--bind DIR]... [-W|--workdir DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-b|--box NAME|DIR] [-a|--app-box] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] [-p|--permissions LIST]... [--root] /usr/bin/someapp [args...]
-sandbox.sh [-b NAME|DIR] --reset-system
-sandbox.sh [options] --install PKG.deb... [dpkg options]
+sandbox [-i|--interactive] [-w|--bind DIR]... [-W|--workdir DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-b|--box NAME|DIR] [-a|--app-box] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] [-p|--permissions LIST]... [--root] /usr/bin/someapp [args...]
+sandbox [-b NAME|DIR] --reset-system
 ```
 
 - `-i`, `--interactive` — drop `--new-session` so an interactive shell inside
@@ -92,7 +101,7 @@ sandbox.sh [options] --install PKG.deb... [dpkg options]
   into a second userns mapping root back, so files keep their normal
   ownership (without this everything the user owns shows as `root:root`).
   Ubuntu's userns restriction strips the sandboxed app of the capabilities
-  needed to write its own uid map, so sandbox.sh writes the map from outside,
+  needed to write its own uid map, so sandbox writes the map from outside,
   from the parent (sandbox) userns — joining one isn't gated, only creating.
   Exception: snap apps keep the fake root, since their nested userns is
   deliberately forbidden (see above).
@@ -154,7 +163,7 @@ sandbox.sh [options] --install PKG.deb... [dpkg options]
   (the `--root` view can't use that mode: it would make the daemon deny
   fake root wherever no record says otherwise), so what `--root` runs
   install, like what is dropped into the box from outside, carries no
-  record — and before a plain view is mounted, sandbox.sh labels
+  record — and before a plain view is mounted, sandbox labels
   everything unrecorded root's (`0:0`, real mode kept). What the app
   creates gets a record of its own and stays the app's. A `--root` run
   concurrent with a plain one is seen by the running app as the app's own
@@ -180,9 +189,10 @@ sandbox.sh [options] --install PKG.deb... [dpkg options]
   shadows of them. Anything a package installs shadows the host's version
   from then on, host upgrades included (e.g. `ld.so.cache` after a postinst
   runs `ldconfig`).
-  `--root` runs preload `rootshim.so` (build it once with `make`; without
-  it `--root` warns), which papers over two consequences of "root" being a
-  bare uid without capabilities, see `rootshim.c`: a directory created with
+  `--root` runs preload `rootshim.so` (compiled from `rootshim.c` at build
+  time and embedded in the binary; written to the box's `.work/` and bound
+  inside), which papers over two consequences of "root" being a bare uid
+  without capabilities: a directory created with
   mode 000 — dpkg does that for every directory, chmodding later — can't be
   opened by the FUSE daemon to finish the mkdir, so the shim keeps the
   owner's bits in every mode an installer sets (`rwx` on directories, `rw`
@@ -201,8 +211,8 @@ sandbox.sh [options] --install PKG.deb... [dpkg options]
   again, until the next `--root` run. Refused while a sandbox has the box's
   layers mounted. Takes no app: `sandbox -b mybox --reset-system`.
 
-The app name is resolved with `which`, so `sandbox.sh ping` and
-`sandbox.sh /usr/bin/ping` run the same binary and (with `-a`) use the same
+The app name is resolved with `which`, so `sandbox ping` and
+`sandbox /usr/bin/ping` run the same binary and (with `-a`) use the same
 box.
 
 ## Requirements
@@ -213,7 +223,7 @@ box.
   an existing namespace isn't gated by the Ubuntu userns restriction.
 - `fuse-overlayfs` (`apt install fuse-overlayfs`) — only for boxes with a
   system layer, i.e. `--root` and everything after it.
-- a C compiler and `make` to build `rootshim.so` — only for `--root`.
+- to build: `cargo` and a C compiler (for `rootshim.c`).
 - On Ubuntu 24.04+ unprivileged user namespaces are restricted by AppArmor.
   The `apparmor` package ships `/etc/apparmor.d/bwrap-userns-restrict`,
   which lets bwrap create them and confines everything it starts to a
