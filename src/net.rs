@@ -236,8 +236,11 @@ pub fn run(
     };
 
     // the first status message arrives once the namespaces exist; it also
-    // carries namespace inode numbers, so pick the child-pid field specifically
-    let line = read_line_timeout(status.read, Duration::from_secs(10)).unwrap_or_default();
+    // carries namespace inode numbers, so pick the child-pid field specifically.
+    // The pipe stays open until bwrap has exited: bwrap writes the app's exit
+    // status there too, and a closed read end would kill it with SIGPIPE
+    let status_read = fs::File::from(status.read);
+    let line = read_line_timeout(&status_read, Duration::from_secs(10)).unwrap_or_default();
     let child_pid = parse_child_pid(&line).unwrap_or_else(|| {
         kill_all(&[child.id() as i32]);
         die(1, "bwrap did not report a child pid")
@@ -293,6 +296,7 @@ pub fn run(
     let status = child
         .wait()
         .unwrap_or_else(|e| die(1, format!("waiting for bwrap: {e}")));
+    drop(status_read);
     exit_code(status)
 }
 
@@ -305,8 +309,7 @@ fn parse_child_pid(line: &str) -> Option<i32> {
 }
 
 /// Read one line from a pipe, giving up after `timeout`.
-fn read_line_timeout(fd: OwnedFd, timeout: Duration) -> Option<String> {
-    let mut f = fs::File::from(fd);
+fn read_line_timeout(mut f: &fs::File, timeout: Duration) -> Option<String> {
     let mut line = Vec::new();
     let deadline = Instant::now() + timeout;
     loop {
@@ -388,17 +391,19 @@ mod tests {
     fn line_with_and_without_data() {
         let p = Pipe::new();
         fs::File::from(p.write).write_all(b"hello\nrest").unwrap();
+        let r = fs::File::from(p.read);
         assert_eq!(
-            read_line_timeout(p.read, Duration::from_secs(1)).as_deref(),
+            read_line_timeout(&r, Duration::from_secs(1)).as_deref(),
             Some("hello")
         );
-        let p = Pipe::new(); // nothing ever written: times out
-        assert_eq!(read_line_timeout(p.read, Duration::from_millis(50)), None);
-        let p = Pipe::new(); // EOF without a newline still yields the data
-        fs::File::from(p.write).write_all(b"partial").unwrap();
         assert_eq!(
-            read_line_timeout(p.read, Duration::from_secs(1)).as_deref(),
-            Some("partial")
+            read_line_timeout(&r, Duration::from_millis(50)).as_deref(),
+            Some("rest") // the pipe stays usable: EOF without a newline still yields the data
+        );
+        let p = Pipe::new(); // nothing ever written: times out
+        assert_eq!(
+            read_line_timeout(&fs::File::from(p.read), Duration::from_millis(50)),
+            None
         );
     }
 }
