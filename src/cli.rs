@@ -93,6 +93,8 @@ options:
                       grant extra access to host resources, comma-separated;
                       repeatable. Known permissions:
                         camera   the webcam(s): /dev/video* and /dev/media*
+                        usb      USB and HID devices: the whole host /dev,
+                                 live, and udev hot-plug events relayed in
                         x11      same as -x
   --root              run as root inside: uid 0 in the sandbox is your own
                       uid outside, so it grants no host privileges; files it
@@ -133,6 +135,7 @@ pub struct Opts {
     pub ipv6: bool,
     pub x11: bool,
     pub camera: bool,
+    pub usb: bool,
     pub root: bool,
     pub reset: bool,
     /// the app and its arguments, verbatim
@@ -257,11 +260,12 @@ fn permissions(o: &mut Opts, list: &str) -> Result<(), CliError> {
     for perm in list.split(',') {
         match perm {
             "camera" => o.camera = true,
+            "usb" => o.usb = true,
             "x11" => o.x11 = true,
             "" => {}
             other => {
                 return Err(CliError::usage(format!(
-                    "unknown permission: {other} (known: camera, x11)"
+                    "unknown permission: {other} (known: camera, usb, x11)"
                 )))
             }
         }
@@ -340,6 +344,8 @@ mod tests {
         assert!(o.camera && o.x11);
         let o = parse_ok(&["-p", "camera", "--permissions", "x11", "app"]);
         assert!(o.camera && o.x11);
+        let o = parse_ok(&["-p", "usb", "app"]);
+        assert!(o.usb && !o.camera);
         match parse_err(&["-p", "nfc", "app"]) {
             CliError::Usage { message } => assert!(message.contains("unknown permission: nfc")),
             e => panic!("{e:?}"),

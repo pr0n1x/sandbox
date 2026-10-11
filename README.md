@@ -39,7 +39,8 @@ ln -s "$PWD/target/release/sandbox" ~/bin/sandbox
   changes land in the box and the host stays untouched.
 - **Wayland GUI, GPU and sound**: the Wayland socket, `/dev/dri` and
   PipeWire/PulseAudio sockets are passed through. D-Bus is deliberately not.
-  The webcam is not either, unless granted with `-p camera`.
+  The webcam is not either, unless granted with `-p camera`, nor are USB
+  and HID devices without `-p usb`.
 - **System appearance**: the host's theme configs (`~/.config/kdeglobals`,
   GTK `settings.ini`, `qt5ct`/`qt6ct`, `~/.themes`, `~/.icons`, and the
   dconf database `~/.config/dconf/user`) are bound read-only into the box
@@ -134,6 +135,33 @@ sandbox [-b NAME|DIR] --reset-system
     node is bound into the sandbox's otherwise minimal `/dev`. Without the
     D-Bus session bus there is no camera portal, so apps must use V4L2
     directly (Firefox and Chromium do).
+  - `usb` — USB and HID devices (security keys, microcontroller boards,
+    phones, anything an app talks to directly). Two things in the sandbox's
+    design get in the way of such devices, and this permission undoes both:
+    - The sandbox's `/dev` is a fresh minimal one, with nodes bound into it
+      one by one. A bind mount attaches to the node that exists at that
+      moment, not to its name, so a node the kernel creates later is simply
+      not there inside — and a device re-enumerates whenever it reboots: a
+      firmware update takes it through its bootloader, a mode switch gives it
+      a new identity, each time with new `/dev/bus/usb/...` and
+      `/dev/hidraw*` nodes. The app would lose the device halfway. So the
+      host's whole `/dev` is bound in its place, live (`/dev/shm` stays
+      private; `/run/udev` is bound read-only for libudev's property
+      database). The cost: the app sees every device node your user can
+      open on the host — sound cards, cameras, host ptys — so grant this only
+      to apps that need a device. Access is still governed by the host's
+      udev rules.
+    - The sandbox has its own network namespace, and hot-plug events are
+      netlink multicasts: udevd sends them in the host's namespace, and a
+      netlink socket only receives from its own. libudev users (Chromium's
+      WebHID and WebUSB, hidapi) enumerate once at start and learn of every
+      later change from those events, so a device that appears or comes back
+      after start would stay invisible to the app even though its node is
+      now there. So `sandbox` keeps a helper that subscribes to udevd's
+      events on the host, joins the sandbox's user and network namespaces
+      (as their owner it holds every capability there, the way pasta does)
+      and re-sends each event inside. libudev accepts them because the
+      sender's uid is the app's own.
   - `x11` — same as `-x`.
 - **The system layer** (no option: a box has one once `usr/`, `etc/`,
   `opt/` or `var/` exist in it, which a `--root` run creates; every start

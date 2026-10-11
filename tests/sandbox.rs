@@ -251,6 +251,40 @@ fn system_is_read_only_offline_and_renamed() {
 }
 
 #[test]
+fn usb_permission_binds_the_whole_dev_with_a_private_shm() {
+    require!(bwrap_works(), "bwrap can't create a sandbox here");
+    require!(
+        Path::new("/dev/bus/usb").is_dir(),
+        "no /dev/bus/usb on this host"
+    );
+    let s = Scratch::new("usb");
+    let script = "test -d /dev/bus/usb && echo usb || echo no-usb; \
+                  ls /dev/hidraw* 2>/dev/null | wc -l; \
+                  ls -A /dev/shm | wc -l; \
+                  test -d /run/udev && echo udev || echo no-udev";
+    // withheld by default: the minimal /dev
+    assert_eq!(lines(&s.sh(&[], script))[0], "no-usb");
+    // granted: the host's /dev as is, except a private /dev/shm
+    let out = lines(&s.sh(&["-p", "usb"], script));
+    let host_hidraws = fs::read_dir("/dev")
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("hidraw"))
+        .count();
+    assert_eq!(out[0], "usb");
+    assert_eq!(out[1], host_hidraws.to_string());
+    assert_eq!(out[2], "0");
+    assert_eq!(
+        out[3],
+        if Path::new("/run/udev").is_dir() {
+            "udev"
+        } else {
+            "no-udev"
+        }
+    );
+}
+
+#[test]
 fn exit_status_stdin_and_stdout_pass_through() {
     require!(bwrap_works(), "bwrap can't create a sandbox here");
     let s = Scratch::new("stdio");

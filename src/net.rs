@@ -84,6 +84,16 @@ impl Pipes {
     }
 }
 
+/// What `run` sets up around bwrap.
+pub struct Helpers<'a> {
+    /// -n: pasta and the sysctls
+    pub net: Option<&'a Net>,
+    /// a snap app: its userns ban goes in with the sysctls
+    pub snap: bool,
+    /// -p usb: the udev event relay
+    pub usb: bool,
+}
+
 pub struct Net {
     /// -4, or nothing with -6 (pasta's defaults are both)
     pasta_ip: Vec<String>,
@@ -190,23 +200,24 @@ pub fn exit_code(status: std::process::ExitStatus) -> i32 {
         .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
 }
 
-/// Run bwrap with networking: spawn it held on the block fd, attach pasta,
-/// set sysctls, release it, write the app's nested uid map, wait.
+/// Run bwrap with helpers that need its namespaces: spawn it held on the
+/// block fd, attach pasta (-n), start the udev event relay (-p usb), set
+/// sysctls, release it, write the app's nested uid map, wait.
 pub fn run(
     bwrap_args: &[OsString],
     app_wrap: &[String],
     app: &Path,
     app_args: &[String],
-    net: &Net,
-    snap: bool,
+    helpers: Helpers,
     pipes: Pipes,
 ) -> i32 {
+    let Helpers { net, snap, usb } = helpers;
     let Pipes {
         status,
         block,
         resolv,
     } = pipes;
-    {
+    if let Some(net) = net {
         let mut w = fs::File::from(resolv.write);
         let _ = writeln!(w, "nameserver {}", net.dns_fwd);
     } // closed: bwrap reads the data up to EOF
@@ -246,45 +257,53 @@ pub fn run(
         die(1, "bwrap did not report a child pid")
     });
 
-    let mut pasta = vec!["--config-net".to_string(), "--quiet".into()];
-    pasta.extend(net.pasta_ip.iter().cloned());
-    pasta.extend(net.out_args.iter().cloned());
-    pasta.extend(net.fwd_args.iter().cloned());
-    pasta.extend([
-        "--userns".into(),
-        format!("/proc/{child_pid}/ns/user"),
-        "--netns".into(),
-        format!("/proc/{child_pid}/ns/net"),
-    ]);
-    let pasta_ref: Vec<&str> = pasta.iter().map(String::as_str).collect();
-    if !run_tool("pasta", &pasta_ref) {
-        kill_all(&[child_pid, child.id() as i32]);
-        die(1, "pasta failed (is the passt package installed?)");
-    }
+    if let Some(net) = net {
+        let mut pasta = vec!["--config-net".to_string(), "--quiet".into()];
+        pasta.extend(net.pasta_ip.iter().cloned());
+        pasta.extend(net.out_args.iter().cloned());
+        pasta.extend(net.fwd_args.iter().cloned());
+        pasta.extend([
+            "--userns".into(),
+            format!("/proc/{child_pid}/ns/user"),
+            "--netns".into(),
+            format!("/proc/{child_pid}/ns/net"),
+        ]);
+        let pasta_ref: Vec<&str> = pasta.iter().map(String::as_str).collect();
+        if !run_tool("pasta", &pasta_ref) {
+            kill_all(&[child_pid, child.id() as i32]);
+            die(1, "pasta failed (is the passt package installed?)");
+        }
 
-    // a fresh netns has net.ipv4.ping_group_range empty, and modern ping drops
-    // its file caps and only tries unprivileged ICMP datagram sockets, gated
-    // by that sysctl; /proc/sys/net follows the writer's netns. Only gid 0 is
-    // mapped in the sandbox userns, so "0 0" is the widest legal range. For
-    // snaps, zero max_user_namespaces: the app holds no caps and can't gain
-    // any under no_new_privs, so it cannot raise the limit back
-    let mut sysctls = String::from("echo 0 0 > /proc/sys/net/ipv4/ping_group_range");
-    if snap {
-        sysctls += "; echo 0 > /proc/sys/user/max_user_namespaces";
+        // a fresh netns has net.ipv4.ping_group_range empty, and modern ping
+        // drops its file caps and only tries unprivileged ICMP datagram
+        // sockets, gated by that sysctl; /proc/sys/net follows the writer's
+        // netns. Only gid 0 is mapped in the sandbox userns, so "0 0" is the
+        // widest legal range. For snaps, zero max_user_namespaces: the app
+        // holds no caps and can't gain any under no_new_privs, so it cannot
+        // raise the limit back
+        let mut sysctls = String::from("echo 0 0 > /proc/sys/net/ipv4/ping_group_range");
+        if snap {
+            sysctls += "; echo 0 > /proc/sys/user/max_user_namespaces";
+        }
+        let _ = Command::new("nsenter")
+            .args([
+                "--preserve-credentials",
+                "-U",
+                "-n",
+                "-t",
+                &child_pid.to_string(),
+                "sh",
+                "-c",
+                &sysctls,
+            ])
+            .stderr(std::process::Stdio::null())
+            .status();
     }
-    let _ = Command::new("nsenter")
-        .args([
-            "--preserve-credentials",
-            "-U",
-            "-n",
-            "-t",
-            &child_pid.to_string(),
-            "sh",
-            "-c",
-            &sysctls,
-        ])
-        .stderr(std::process::Stdio::null())
-        .status();
+    let relay = if usb {
+        crate::uevent::forward(child_pid)
+    } else {
+        None
+    };
 
     let sandbox_ns = crate::unroot::namespace_of(child_pid);
     // network is up; release the app
@@ -297,6 +316,11 @@ pub fn run(
         .wait()
         .unwrap_or_else(|e| die(1, format!("waiting for bwrap: {e}")));
     drop(status_read);
+    if let Some(pid) = relay {
+        kill_all(&[pid]);
+        // SAFETY: reaping our own child
+        unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
+    }
     exit_code(status)
 }
 

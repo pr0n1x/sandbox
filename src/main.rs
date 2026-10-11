@@ -5,6 +5,7 @@
 mod boxdir;
 mod cli;
 mod net;
+mod uevent;
 mod unroot;
 mod util;
 
@@ -66,13 +67,14 @@ fn main() {
     if opts.root || opts.net {
         push(&mut net_args, &["--uid", "0", "--gid", "0"]);
     }
-    // -n: the pipes bwrap gets, and the sandbox resolv.conf — its contents
-    // come through one of them — bound at the symlink target (e.g.
-    // systemd-resolved's stub under /run), creating its directory; must come
-    // after the /etc bind or it gets buried
-    let pipes = opts.net.then(net::Pipes::new);
+    // -n and -p usb: the pipes bwrap gets (its helpers need the sandbox's
+    // pid), and with -n the sandbox resolv.conf — its contents come through
+    // one of them — bound at the symlink target (e.g. systemd-resolved's stub
+    // under /run), creating its directory; must come after the /etc bind or
+    // it gets buried
+    let pipes = (opts.net || opts.usb).then(net::Pipes::new);
     let mut resolv_args: Vec<OsString> = Vec::new();
-    if let Some(p) = &pipes {
+    if let (Some(p), true) = (&pipes, opts.net) {
         let resolv = realpath_m(Path::new("/etc/resolv.conf"));
         let dir = resolv.parent().unwrap_or(Path::new("/")).to_path_buf();
         resolv_args.extend([
@@ -146,6 +148,28 @@ fn main() {
         if camera_args.is_empty() {
             warn("-p camera: no /dev/video* devices found");
         }
+    }
+
+    // -p usb: the whole host /dev, so a device that re-enumerates while the
+    // sandbox runs (a firmware update reboots the device into its bootloader,
+    // with new USB and hidraw nodes) stays reachable; binding single nodes
+    // at start can't follow that. /dev/shm is kept private, /run/udev read
+    // only for libudev's property database. Replaces the minimal --dev
+    let mut usb_args: Vec<OsString> = Vec::new();
+    if opts.usb {
+        push(
+            &mut usb_args,
+            &[
+                "--dev-bind",
+                "/dev",
+                "/dev",
+                "--tmpfs",
+                "/dev/shm",
+                "--ro-bind-try",
+                "/run/udev",
+                "/run/udev",
+            ],
+        );
     }
 
     let netconf = if opts.net {
@@ -293,19 +317,16 @@ fn main() {
     );
     args.extend(snap_args);
     args.extend(resolv_args);
-    push(
-        &mut args,
-        &[
-            "--proc",
-            "/proc",
-            "--dev",
-            "/dev",
-            "--dev-bind",
-            "/dev/dri",
-            "/dev/dri",
-        ],
-    );
-    args.extend(camera_args);
+    push(&mut args, &["--proc", "/proc"]);
+    if opts.usb {
+        args.extend(usb_args);
+    } else {
+        push(
+            &mut args,
+            &["--dev", "/dev", "--dev-bind", "/dev/dri", "/dev/dri"],
+        );
+        args.extend(camera_args);
+    }
     push(&mut args, &["--ro-bind", "/sys", "/sys", "--tmpfs", "/tmp"]);
     args.extend(x11_args);
     args.extend([
@@ -383,7 +404,7 @@ fn main() {
         push(&mut args, &["--unsetenv", "LD_PRELOAD"]);
     }
 
-    let code = match netconf {
+    let code = match pipes {
         None => {
             if cleanup.0.is_empty() {
                 // nothing to clean up afterwards: become bwrap
@@ -407,14 +428,17 @@ fn main() {
                     .unwrap_or_else(|e| die(1, format!("waiting for bwrap: {e}"))),
             )
         }
-        Some(n) => net::run(
+        Some(pipes) => net::run(
             &args,
             &app_wrap,
             &app,
             &app_args,
-            &n,
-            snap,
-            pipes.expect("pipes exist with -n"),
+            net::Helpers {
+                net: netconf.as_ref(),
+                snap,
+                usb: opts.usb,
+            },
+            pipes,
         ),
     };
     drop(cleanup);
