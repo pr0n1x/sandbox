@@ -1,22 +1,26 @@
 #!/usr/bin/env bash
-# Badge an app icon with a "#" mark and install it into the user's icon theme,
-# so a sandboxed launcher can be told apart from the real one.
+# Badge an app icon with a mark ("#" by default) and install it into the
+# user's icon theme, so a sandboxed launcher can be told apart from the real
+# one — and, with different marks, from each other.
 #
-#   sandbox-icon.sh [-o NAME] ICON
+#   sandbox-icon.sh [-o NAME] [-m MARK] ICON
 #
 # ICON is an icon name (looked up in the hicolor theme and /usr/share/pixmaps)
-# or a path to a PNG/SVG. The result is installed as
-# ~/.local/share/icons/hicolor/<size>x<size>/apps/NAME.png for the usual
-# sizes (default NAME: <icon>-sandboxed) and the name is printed, ready for
-# an Icon= line. Needs ImageMagick 7 (magick).
+# or a path to a PNG/SVG. MARK is the text drawn in the badge: a character or
+# two, e.g. "#", "W", "$", "₿" (longer text is shrunk to fit). The result is
+# installed as ~/.local/share/icons/hicolor/<size>x<size>/apps/NAME.png for
+# the usual sizes (default NAME: <icon>-sandboxed) and the name is printed,
+# ready for an Icon= line. Needs ImageMagick 7 (magick).
 set -eu
 
-usage() { echo "usage: sandbox-icon.sh [-o NAME] ICON" >&2; exit 2; }
+usage() { echo "usage: sandbox-icon.sh [-o NAME] [-m MARK] ICON" >&2; exit 2; }
 
 NAME=""
-while getopts o:h OPT; do
+MARK="#"
+while getopts o:m:h OPT; do
   case "$OPT" in
     o) NAME="$OPTARG" ;;
+    m) MARK="$OPTARG" ;;
     *) usage ;;
   esac
 done
@@ -49,20 +53,26 @@ DEST="$HOME/.local/share/icons/hicolor"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-# The badge: a dark rounded square in the bottom-right corner, holding a
-# white "#" — it covers ~40% of the edge so it survives downscaling. The
+# The badge: a dark rounded square in the bottom-right corner, holding the
+# mark in white — it covers ~40% of the edge so it survives downscaling. The
 # source is drawn onto a MASTER-sized transparent canvas (SVGs rasterised at
 # high density) so the badge geometry is the same for every icon.
 B=$((MASTER * 40 / 100)); R=$((B / 5)); P=$((MASTER / 32))
 X0=$((MASTER - P - B)); Y0=$((MASTER - P - B))
-magick -background none -density 300 "$SRC[0]" -density 72 \
+# label: reads "%x" as an escape and a leading "@" as a file name
+LABEL="${MARK//%/%%}"; LABEL="${LABEL/#@/\\@}"
+# a bold font that has every character of the mark: DejaVu Sans when it does
+# (e.g. "#", letters, "$"), else whatever fontconfig finds with the glyphs
+CHARSET="$(printf '%s' "$MARK" | iconv -f UTF-8 -t UTF-32BE | od -An -tx1 -v | tr -d ' \n' | sed 's/.\{8\}/&,/g; s/,$//')"
+FONT="$(fc-match -f '%{file}' "DejaVu Sans:weight=bold:charset=$CHARSET")"
+magick -background none -density 300 "${SRC[0]}" -density 72 \
   -resize "${MASTER}x${MASTER}" -gravity center -extent "${MASTER}x${MASTER}" \
   \( -size "${MASTER}x${MASTER}" xc:none \
      -fill '#202020' -stroke white -strokewidth $((MASTER / 64)) \
      -draw "roundrectangle $X0,$Y0 $((X0 + B)),$((Y0 + B)) $R,$R" \) \
   -compose over -composite \
   \( -size "$((B * 3 / 4))x$((B * 3 / 4))" -background none -fill white \
-     -font DejaVu-Sans-Bold -gravity center label:'#' \) \
+     -font "$FONT" -gravity center label:"$LABEL" \) \
   -gravity northwest -geometry "+$((X0 + B / 8))+$((Y0 + B / 8))" -composite \
   "$TMP/master.png"
 

@@ -296,16 +296,20 @@ box.
 
 ## Launcher icons
 
-`sandbox-icon.sh` badges an app icon with a `#` mark so a sandboxed launcher
-is distinguishable from the real one (there is no way to overlay an icon from
-a `.desktop` file itself — the `Icon=` key only takes a name or a path):
+`sandbox-icon.sh` badges an app icon with a mark, `#` by default, so a
+sandboxed launcher is distinguishable from the real one — and, with a mark
+per box, launchers of the same app in different boxes from each other (there
+is no way to overlay an icon from a `.desktop` file itself — the `Icon=` key
+only takes a name or a path):
 
 ```sh
 sandbox-icon.sh firefox                        # icon name from the theme
 sandbox-icon.sh -o max-sandboxed /usr/share/pixmaps/max.png
+sandbox-icon.sh -o google-chrome-work -m W google-chrome   # a "W" badge
 ```
 
 It composites the badge onto the icon (PNG or SVG, name or path), installs
 the result at the usual sizes into `~/.local/share/icons/hicolor/` as
 `<icon>-sandboxed` (or the `-o` name) and prints that name for the launcher's
-`Icon=` line. Needs ImageMagick 7.
+`Icon=` line. `-m MARK` sets the badge text: a character or two, longer text
+is shrunk to fit. Needs ImageMagick 7.
