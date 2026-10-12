@@ -261,6 +261,15 @@ pub fn unmount(mounts: &[PathBuf]) {
 /// --root: the shim, written to the box's scratch dir and bound inside.
 /// The mountpoint file is created here with a normal mode, so the empty
 /// file it leaves in the box can be labeled like the rest.
+///
+/// Call before mount_layer: the file is written straight into the upper
+/// layer, and a running fuse-overlayfs must not find it there behind its
+/// back. If something walks the fresh mount first (an IDE's file watcher
+/// scanning a new directory does), the daemon has /usr/lib cached as
+/// lower-only; bwrap's create of the mountpoint then makes it copy the
+/// directory up by renaming a scratch copy over `<box>/usr/lib`, which
+/// fails with ENOTEMPTY because that directory exists and holds this file,
+/// and bwrap dies with "Can't create file at /usr/lib/sandbox-rootshim.so".
 pub fn shim_args(b: &BoxDir) -> Vec<OsString> {
     let so = b.path.join(".work/rootshim.so");
     let _ = fs::create_dir_all(b.path.join(".work"));

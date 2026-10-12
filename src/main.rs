@@ -271,17 +271,19 @@ fn main() {
     }
     let app = app.expect("an app to run");
 
+    // the shim's mountpoint file goes into the upper layer before the layer
+    // is mounted: fuse-overlayfs must see it from the start (boxdir::shim_args)
+    let shim_args = if opts.root {
+        boxdir::shim_args(&bx)
+    } else {
+        Vec::new()
+    };
     let layer = if boxdir::has_layer(&bx) || opts.root {
         boxdir::mount_layer(&bx, opts.root)
     } else {
         boxdir::plain()
     };
     let cleanup = Cleanup(layer.mounts.clone());
-    let shim_args = if opts.root {
-        boxdir::shim_args(&bx)
-    } else {
-        Vec::new()
-    };
 
     let runtime = PathBuf::from(
         std::env::var_os("XDG_RUNTIME_DIR").unwrap_or_else(|| die(1, "XDG_RUNTIME_DIR is not set")),
