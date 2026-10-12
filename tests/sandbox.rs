@@ -233,6 +233,11 @@ fn system_is_read_only_offline_and_renamed() {
          echo \"$WAYLAND_DISPLAY\"; stat -c %a \"$XDG_RUNTIME_DIR\"; \
          test -e \"$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY\" && echo socket",
     );
+    let bus = if have("dbus-daemon") {
+        format!("unix:path={}/bus", s.dir.join("run").display())
+    } else {
+        "unset".into()
+    };
     assert_eq!(
         lines(&o),
         [
@@ -242,12 +247,50 @@ fn system_is_read_only_offline_and_renamed() {
             "read-only",
             "no-var", // only a box with a system layer has /var
             "0",      // a fresh tmpfs
-            "unset",  // no D-Bus
+            &bus,     // the sandbox's own session bus, not the host's
             "wayland-0",
             "700",
             "socket",
         ]
     );
+}
+
+#[test]
+fn the_session_bus_is_private_and_works() {
+    require!(bwrap_works(), "bwrap can't create a sandbox here");
+    require!(
+        have("dbus-daemon") && have("dbus-send"),
+        "dbus-daemon/dbus-send are not installed"
+    );
+    let s = Scratch::new("bus");
+    let id = "dbus-send --session --print-reply --dest=org.freedesktop.DBus / \
+              org.freedesktop.DBus.GetId | tail -n1";
+    // reachable, with nothing but the bus itself on it; two sandboxes have
+    // two buses, and --root gets one too
+    let o = s.sh(
+        &[],
+        &format!(
+            "{id} > /tmp/id && echo bus; \
+             dbus-send --session --print-reply --dest=org.freedesktop.DBus / \
+               org.freedesktop.DBus.ListNames | grep -c 'string \"org' "
+        ),
+    );
+    assert_eq!(lines(&o), ["bus", "1"]);
+    let mut a = hold(
+        &s,
+        &[],
+        &format!("{id} > /tmp/id; echo ready; exec sleep 30"),
+    );
+    let o = s.sh(
+        &[],
+        &format!("[ \"$({id})\" = \"$(cat /tmp/id)\" ] && echo same || echo other"),
+    );
+    assert_eq!(lines(&o), ["same"], "a joined run is on the sandbox's bus");
+    let o = s.sh(&["-s"], &format!("{id} > /dev/null && echo bus"));
+    assert_eq!(lines(&o), ["bus"]);
+    // SAFETY: our own child's pid
+    unsafe { libc::kill(a.id() as i32, libc::SIGTERM) };
+    wait_for(&mut a, Duration::from_secs(10));
 }
 
 #[test]
@@ -604,13 +647,15 @@ fn a_run_like_a_running_sandbox_joins_it() {
     let o = s
         .sandbox()
         .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nowhere")
+        .env("SESSION_MANAGER", "local/host:/nowhere")
         .args(["-d", "/usr", "-b"])
         .arg(s.box_dir())
         .args([
             "sh",
             "-c",
             "pwd; test -e /tmp/from-a && echo shared || echo own; cat /proc/sys/kernel/hostname; \
-             id -u; echo ${DBUS_SESSION_BUS_ADDRESS:-unset} $WAYLAND_DISPLAY; \
+             id -u; echo ${SESSION_MANAGER:-unset} $WAYLAND_DISPLAY; \
+             test \"$DBUS_SESSION_BUS_ADDRESS\" = \"unix:path=$XDG_RUNTIME_DIR/bus\" && echo own-bus; \
              cat /proc/[0-9]*/comm | grep -c '^sleep$'; grep '^CapEff' /proc/self/status; \
              grep '^NoNewPrivs' /proc/self/status",
         ])
@@ -624,6 +669,7 @@ fn a_run_like_a_running_sandbox_joins_it() {
             "sandbox",
             &uid(),
             "unset wayland-0",
+            "own-bus",
             "1",
             "CapEff:\t0000000000000000",
             "NoNewPrivs:\t1"

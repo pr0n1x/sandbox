@@ -38,7 +38,12 @@ ln -s "$PWD/target/release/sandbox" ~/bin/sandbox
   and `/var` instead: installed software appears as part of the system,
   changes land in the box and the host stays untouched.
 - **Wayland GUI, GPU and sound**: the Wayland socket, `/dev/dri` and
-  PipeWire/PulseAudio sockets are passed through. D-Bus is deliberately not.
+  PipeWire/PulseAudio sockets are passed through. The host's D-Bus session
+  bus is deliberately not: the sandbox gets a session bus of its own, a
+  `dbus-daemon` started inside it before the app (at `$XDG_RUNTIME_DIR/bus`
+  as usual), with nothing on it but the apps of that sandbox. That is what
+  lets a second run joining the first talk to it (see below): Firefox asks
+  its running instance for a new window over the session bus.
   The webcam is not either, unless granted with `-p camera`, nor are USB
   and HID devices without `-p usb`.
 - **System appearance**: the host's theme configs (`~/.config/kdeglobals`,
@@ -48,7 +53,7 @@ ln -s "$PWD/target/release/sandbox" ~/bin/sandbox
   matters on Wayland: GTK takes the theme and the titlebar-button layout
   (KDE syncs both into GSettings) from there, overriding `settings.ini` —
   without it Firefox draws GNOME's `menu:close` buttons in Adwaita. Apps that only listen to the desktop portal (libadwaita, Electron)
-  won't pick it up — that would need the D-Bus session bus.
+  won't pick it up — there is no portal on the sandbox's bus.
 - **No terminal control** by default (`--new-session`).
 - **Snap binaries** (app path under `/snap`, e.g.
   `` sandbox "$(realpath /snap/firefox/current/usr/lib/firefox/firefox)" ``):

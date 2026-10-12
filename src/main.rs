@@ -240,6 +240,45 @@ fn main() {
         Vec::new()
     };
 
+    // a session bus of the sandbox's own: dbus-daemon started inside before
+    // the app, listening where a session bus usually does. Nothing serves on
+    // it, so it opens no door to the host; it lets the apps of one sandbox
+    // talk to each other, as a second run joining the first does — Firefox
+    // asks its running instance for a new window over it, and without a bus
+    // on Wayland it has no other way and reports the instance "not
+    // responding" at the profile lock. The daemon dies with the sandbox.
+    // It gets a config of its own rather than --session: the stock session
+    // config lists the host's service directories, and a bus that can
+    // activate services starts the host's desktop inside the sandbox on
+    // demand — the first name Chrome asks for brings up kwalletd6 (with
+    // no wallet in the box, so its new-wallet wizard pops up and Chrome's
+    // basic-store cookies and passwords stop decrypting), the portals,
+    // at-spi, gvfs. Without service directories a name nobody owns just
+    // doesn't exist, as on a bus-less sandbox before
+    let bus_wrap: Vec<String> = if util::exists("dbus-daemon") {
+        [
+            "sh",
+            "-c",
+            "printf '%s\\n' \
+               '<!DOCTYPE busconfig PUBLIC \"-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN\"' \
+               ' \"http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd\">' \
+               '<busconfig><type>session</type><keep_umask/><auth>EXTERNAL</auth>' \
+               \"<listen>unix:path=$XDG_RUNTIME_DIR/bus</listen>\" \
+               '<policy context=\"default\"><allow send_destination=\"*\" eavesdrop=\"true\"/>' \
+               '<allow eavesdrop=\"true\"/><allow own=\"*\"/></policy></busconfig>' \
+               > \"$XDG_RUNTIME_DIR/bus.conf\"; \
+             dbus-daemon --config-file=\"$XDG_RUNTIME_DIR/bus.conf\" --fork --nopidfile --nosyslog \
+               >/dev/null 2>&1; \
+             exec \"$0\" \"$@\"",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    } else {
+        Vec::new()
+    };
+    let app_prefix: Vec<String> = app_wrap.iter().chain(&bus_wrap).cloned().collect();
+
     // mirror the binary's file capabilities (e.g. ping's cap_net_raw=ep), which
     // no_new_privs would silently drop at exec, as ambient caps in the sandbox userns
     let mut cap_args: Vec<OsString> = Vec::new();
@@ -359,7 +398,23 @@ fn main() {
         );
         args.extend(camera_args);
     }
-    push(&mut args, &["--ro-bind", "/sys", "/sys", "--tmpfs", "/tmp"]);
+    // securityfs hidden: Ubuntu's dbus-daemon mediates its clients through
+    // AppArmor when it finds it, and the policy query writes to securityfs,
+    // read-only here, so every connection would be refused. Without the
+    // mount AppArmor reads as unavailable and the bus runs unmediated, as
+    // the sandbox's own bus should (see bus_wrap)
+    push(
+        &mut args,
+        &[
+            "--ro-bind",
+            "/sys",
+            "/sys",
+            "--tmpfs",
+            "/sys/kernel/security",
+            "--tmpfs",
+            "/tmp",
+        ],
+    );
     args.extend(x11_args);
     args.extend([
         "--bind".into(),
@@ -408,18 +463,28 @@ fn main() {
             p.into_os_string(),
         ]);
     }
+    // the host's session bus and session manager are out of reach: point
+    // at the sandbox's own bus, drop the manager (its socket is in the host's
+    // /tmp; ICE would otherwise complain about a non-local host at startup).
     // gtk3-nocsd forces server-side titlebars onto every GTK app via env; the
     // preload works inside too (/usr is bound) and silently overrides the
     // app's own decoration setting (e.g. firefox's titlebar checkbox): strip
     // it. --root prepends the shim
+    if bus_wrap.is_empty() {
+        push(&mut args, &["--unsetenv", "DBUS_SESSION_BUS_ADDRESS"]);
+    } else {
+        push(
+            &mut args,
+            &[
+                "--setenv",
+                "DBUS_SESSION_BUS_ADDRESS",
+                &format!("unix:path={}/bus", runtime.display()),
+            ],
+        );
+    }
     push(
         &mut args,
-        &[
-            "--unsetenv",
-            "GTK_CSD",
-            "--unsetenv",
-            "DBUS_SESSION_BUS_ADDRESS",
-        ],
+        &["--unsetenv", "SESSION_MANAGER", "--unsetenv", "GTK_CSD"],
     );
     let host_preload = std::env::var("LD_PRELOAD").ok();
     let mut preload: Vec<String> = host_preload
@@ -538,6 +603,7 @@ fn main() {
                 // nothing to clean up afterwards: become bwrap
                 let err = Command::new("bwrap")
                     .args(&args)
+                    .args(&bus_wrap)
                     .arg(&app)
                     .args(&app_args)
                     .exec();
@@ -545,6 +611,7 @@ fn main() {
             }
             let mut child = Command::new("bwrap")
                 .args(&args)
+                .args(&bus_wrap)
                 .arg(&app)
                 .args(&app_args)
                 .spawn()
@@ -558,7 +625,7 @@ fn main() {
         }
         Some(pipes) => net::run(
             &args,
-            &app_wrap,
+            &app_prefix,
             &app,
             &app_args,
             net::Helpers {
