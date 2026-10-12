@@ -352,6 +352,53 @@ fn binds_at_their_real_paths_with_the_symlink_recreated() {
 }
 
 #[test]
+fn an_app_outside_every_bind_is_bound_read_only_by_itself() {
+    require!(bwrap_works(), "bwrap can't create a sandbox here");
+    let s = Scratch::new("app-bind");
+    // an executable in the scratch dir, which nothing binds; its sibling
+    // must stay hidden and the file itself read-only
+    fs::create_dir(s.dir.join("app")).unwrap();
+    let exe = s.dir.join("app/run");
+    fs::write(
+        &exe,
+        "#!/bin/sh\necho ran; echo x >> \"$0\" 2>/dev/null && echo writable || echo read-only; \
+         test -e \"${0%/*}/sibling\" && echo visible || echo hidden\n",
+    )
+    .unwrap();
+    fs::set_permissions(&exe, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    fs::write(s.dir.join("app/sibling"), "").unwrap();
+    let run = |opts: &[&str]| {
+        s.sandbox()
+            .args(opts)
+            .arg("-b")
+            .arg(s.box_dir())
+            .arg(&exe)
+            .output()
+            .expect("runs sandbox")
+    };
+    assert_eq!(lines(&run(&[])), ["ran", "read-only", "hidden"]);
+    // under a -r bind the directory is already there, sibling included
+    assert_eq!(
+        lines(&run(&["-r", &s.path("app")])),
+        ["ran", "read-only", "visible"]
+    );
+    // under the real home the mountpoint lands in the box home: bwrap's
+    // empty file and the directories down to it are gone afterwards
+    fs::create_dir_all(s.home().join("src/proj")).unwrap();
+    let under_home = s.home().join("src/proj/run");
+    fs::copy(&exe, &under_home).unwrap();
+    let o = s
+        .sandbox()
+        .arg("-b")
+        .arg(s.box_dir())
+        .arg(&under_home)
+        .output()
+        .unwrap();
+    assert_eq!(lines(&o), ["ran", "read-only", "hidden"]);
+    assert!(!s.box_home().join("src").exists());
+}
+
+#[test]
 fn default_and_per_app_boxes_are_created_under_home() {
     require!(bwrap_works(), "bwrap can't create a sandbox here");
     let s = Scratch::new("boxes");

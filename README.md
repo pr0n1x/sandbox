@@ -244,7 +244,12 @@ sandbox [-b NAME|DIR] --reset-system
 
 The app name is resolved with `which`, so `sandbox ping` and
 `sandbox /usr/bin/ping` run the same binary and (with `-a`) use the same
-box.
+box. An app that lies outside everything the sandbox shows — not under the
+system dirs, `/snap` or a `-w`/`-W`/`-r` bind, typically a binary built
+under the real home, which the box home hides — is bound into the sandbox
+by itself, read-only, at its own path, and leaves no trace in the box. Only
+that one file: an app that needs the files next to it gets its directory
+with `-r`.
 
 ## Requirements
 

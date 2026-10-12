@@ -18,14 +18,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use util::{die, home, output, realpath_e, realpath_m, warn, which};
 
-/// Unmount the layers this run mounted, whichever way main() ends.
-struct Cleanup(Vec<PathBuf>);
-impl Drop for Cleanup {
-    fn drop(&mut self) {
-        boxdir::unmount(&self.0);
-    }
-}
-
 fn main() {
     let opts = match cli::parse(std::env::args().skip(1).collect()) {
         Ok(o) => o,
@@ -283,7 +275,42 @@ fn main() {
     } else {
         boxdir::plain()
     };
-    let cleanup = Cleanup(layer.mounts.clone());
+    let mut cleanup = Cleanup {
+        mounts: layer.mounts.clone(),
+        ro_file_mountpoint: Vec::new(),
+    };
+
+    // an app outside everything the sandbox shows (the system dirs, /snap, the
+    // -w/-W/-r binds): e.g. a binary built under the real home, which the box
+    // home hides. Bind just the file, read-only, at its own path; what the
+    // app needs next to it is the user's call (-r its directory). Under $HOME
+    // the mountpoint lands in the box home on disk: note what bwrap will have
+    // to create there, to remove it afterwards
+    let mut app_bind_args: Vec<OsString> = Vec::new();
+    {
+        let mut shown: Vec<PathBuf> = bind_destinations(&layer.args);
+        shown.extend(bind_destinations(&snap_args));
+        shown.extend(opts.binds.iter().map(|b| b.real.clone()));
+        shown.extend(opts.binds.iter().filter_map(|b| b.symlink_from.clone()));
+        let real = realpath_e(&app).unwrap_or_else(|_| app.clone());
+        if !shown
+            .iter()
+            .any(|d| app.starts_with(d) || real.starts_with(d))
+        {
+            app_bind_args.extend([
+                "--ro-bind".into(),
+                app.clone().into_os_string(),
+                app.clone().into_os_string(),
+            ]);
+            if let Ok(rel) = app.strip_prefix(&home) {
+                let mut p = bx.home.join(rel);
+                while p != bx.home && fs::symlink_metadata(&p).is_err() {
+                    cleanup.ro_file_mountpoint.push(p.clone());
+                    p.pop();
+                }
+            }
+        }
+    }
 
     let runtime = PathBuf::from(
         std::env::var_os("XDG_RUNTIME_DIR").unwrap_or_else(|| die(1, "XDG_RUNTIME_DIR is not set")),
@@ -353,6 +380,7 @@ fn main() {
         args.extend(["--ro-bind-try".into(), h(rel), h(rel)]);
     }
     args.extend(bind_args);
+    args.extend(app_bind_args);
     args.extend(shim_args.clone());
     args.extend([
         "--perms".into(),
@@ -408,7 +436,7 @@ fn main() {
 
     let code = match pipes {
         None => {
-            if cleanup.0.is_empty() {
+            if cleanup.is_empty() {
                 // nothing to clean up afterwards: become bwrap
                 let err = Command::new("bwrap")
                     .args(&args)
@@ -445,4 +473,39 @@ fn main() {
     };
     drop(cleanup);
     std::process::exit(code);
+}
+
+/// Where a list of bwrap bind options mounts things: the destination of
+/// every `--bind`/`--ro-bind`/`--ro-bind-try` in it.
+fn bind_destinations(args: &[OsString]) -> Vec<PathBuf> {
+    args.windows(3)
+        .filter(|w| ["--bind", "--ro-bind", "--ro-bind-try"].contains(&w[0].to_str().unwrap_or("")))
+        .map(|w| PathBuf::from(&w[2]))
+        .collect()
+}
+
+/// What this run leaves behind in the box, undone whichever way main() ends:
+/// the layers it mounted, and the mountpoint of the app's read-only file
+/// bind when it lies in the box home (an empty file bwrap creates there, and
+/// the directories down to it that didn't exist), deepest first.
+struct Cleanup {
+    mounts: Vec<PathBuf>,
+    ro_file_mountpoint: Vec<PathBuf>,
+}
+impl Cleanup {
+    fn is_empty(&self) -> bool {
+        self.mounts.is_empty() && self.ro_file_mountpoint.is_empty()
+    }
+}
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        boxdir::unmount(&self.mounts);
+        for p in &self.ro_file_mountpoint {
+            let _ = match fs::symlink_metadata(p) {
+                Ok(m) if m.is_dir() => fs::remove_dir(p),
+                Ok(m) if m.is_file() && m.len() == 0 => fs::remove_file(p),
+                _ => Ok(()),
+            };
+        }
+    }
 }
