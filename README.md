@@ -67,7 +67,7 @@ ln -s "$PWD/target/release/sandbox" ~/bin/sandbox
 ## Usage
 
 ```sh
-sandbox [-i|--interactive] [-w|--bind DIR]... [-W|--workdir DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-b|--box NAME|DIR] [-a|--app-box] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] [-p|--permissions LIST]... [--root] /usr/bin/someapp [args...]
+sandbox [-i|--interactive] [-s|--separate] [-z|--zygote ID] [-w|--bind DIR]... [-W|--workdir DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-b|--box NAME|DIR] [-a|--app-box] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] [-p|--permissions LIST]... [--root] /usr/bin/someapp [args...]
 sandbox [-b NAME|DIR] --reset-system
 ```
 
@@ -75,6 +75,14 @@ sandbox [-b NAME|DIR] --reset-system
   the sandbox gets job control (like `docker run -i`). Only safe when the
   kernel has `dev.tty.legacy_tiocsti = 0` (default on modern kernels), which
   blocks the TIOCSTI terminal-injection attack `--new-session` guards against.
+- `-s`, `--separate` — a sandbox of its own. By default a run joins a
+  sandbox that is already running with the same box and the same options
+  that shape it (see below); a `-s` run neither joins one nor is joined by
+  later runs.
+- `-z ID`, `--zygote ID` — the sandbox named ID: joined if it is running,
+  started under that name otherwise. Later runs with the same ID join it
+  whatever their other options: `sandbox -z ff -b work -n firefox`, then
+  `sandbox -z ff sh` for a shell next to it.
 - `-w DIR`, `--bind DIR` — bind DIR read-write at its real path inside the
   sandbox; repeatable. This is the way to hand the app a specific
   project/data directory while the rest of `$HOME` stays hidden.
@@ -241,6 +249,39 @@ sandbox [-b NAME|DIR] --reset-system
   the overlay's `.work/` and `.mnt/`. The box then sees the host's system
   again, until the next `--root` run. Refused while a sandbox has the box's
   layers mounted. Takes no app: `sandbox -b mybox --reset-system`.
+
+## Joining a running sandbox
+
+Every run makes a sandbox of its own, so two of them can't see each other:
+a second `sandbox -a firefox` is a second Firefox that can't find the
+first, and there is no way to open a shell next to a running app for a
+look inside. So by default a run whose box and options match a sandbox
+already running joins it instead, like `docker exec`: the command runs in
+that sandbox's namespaces — its processes, `/tmp`, IPC, hostname and
+network — as the same uid, with the same environment, working directory
+(`-d`/`-W`) and session (`-i`) rules a sandbox of its own would give it,
+and is killed when the sandbox ends. `-s` starts a separate one as before.
+
+What has to match is every option that decides what the app would see
+inside: the box, the `-w`/`-W`/`-r` binds, `-n` and its interface, `-6`,
+`-x`, `-p`, `--root`. The command, `-d`, `-i` and the environment don't
+count. What a sandbox has because of its app — `/snap` for a snap, an app
+outside every bind bound in by itself (see below) — is recorded with it,
+and a command joins if the sandbox has what it needs: a shell joins a
+snap's sandbox, a snap doesn't join a shell's. `-z ID` replaces all of
+that with the name. A starting sandbox records its process under a hash of
+the options (or the name) in `$XDG_RUNTIME_DIR/sandbox/`;
+a later run follows it down to bwrap's init
+and the app, and enters the app's namespaces with one `setns()` on its
+pidfd — the way `nsenter` does, and the only way that works on Ubuntu,
+whose AppArmor treats a process that has already entered the user
+namespace as unprivileged and refuses it the rest. The joined command then
+drops every capability the way bwrap does, keeping the binary's file
+capabilities as ambient ones, and sets `no_new_privs`. One difference to a
+sandbox of its own: bwrap's children run under Ubuntu's `bwrap` AppArmor
+profile, a joined command runs under yours. A recorded sandbox that has
+exited is recognised by its process start time and ignored; one still
+starting is waited for, 5 s at most.
 
 The app name is resolved with `which`, so `sandbox ping` and
 `sandbox /usr/bin/ping` run the same binary and (with `-a`) use the same

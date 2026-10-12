@@ -49,7 +49,7 @@ impl CliError {
     }
 }
 
-const USAGE: &str = "usage: sandbox [-i|--interactive] [-w|--bind DIR]... [-W|--workdir DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-b|--box NAME|DIR] [-a|--app-box] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] [-p|--permissions LIST]... [--root] /usr/bin/someapp [args...]
+const USAGE: &str = "usage: sandbox [-i|--interactive] [-s|--separate] [-z|--zygote ID] [-w|--bind DIR]... [-W|--workdir DIR]... [-r|--ro-bind DIR]... [-d|--chdir DIR] [-b|--box NAME|DIR] [-a|--app-box] [-n|--net[IFACE]] [-6|--ipv6] [-x|--x11] [-p|--permissions LIST]... [--root] /usr/bin/someapp [args...]
        sandbox [-b NAME|DIR] --reset-system";
 
 fn help() -> String {
@@ -72,6 +72,14 @@ See README.md for details.
 options:
   -i, --interactive   keep the terminal session for job control, like
                       'docker run -i' (drops bwrap's --new-session)
+  -s, --separate      a sandbox of its own, never joined. By default a run
+                      whose box and options match a sandbox already
+                      running joins it, like 'docker exec': the command
+                      shares that sandbox's processes, /tmp, IPC and
+                      network, and ends with it
+  -z, --zygote ID     the sandbox named ID: joined if it is running,
+                      started under that name otherwise. Later runs with
+                      the same ID join it whatever their other options
   -w, --bind DIR      rw-bind DIR at its real path; repeatable
   -W, --workdir DIR   rw-bind DIR at its real path and start the app there
                       (in the last one if repeated)
@@ -125,6 +133,9 @@ pub struct Bind {
 #[derive(Debug, Default)]
 pub struct Opts {
     pub interactive: bool,
+    pub separate: bool,
+    /// -z ID: the name under which this sandbox is joined
+    pub zygote: Option<String>,
     pub binds: Vec<Bind>,
     pub workdir: Option<PathBuf>,
     pub chdir: Option<PathBuf>,
@@ -195,6 +206,8 @@ pub fn parse(args: Vec<String>) -> Result<Opts, CliError> {
                 }
                 "box" => o.box_ = Some(value(attached, &mut it, name)?),
                 "app-box" => o.app_box = true,
+                "separate" => o.separate = true,
+                "zygote" => o.zygote = Some(value(attached, &mut it, name)?),
                 "net" => {
                     o.net = true;
                     o.out_if = attached.filter(|s| !s.is_empty())
@@ -216,10 +229,12 @@ pub fn parse(args: Vec<String>) -> Result<Opts, CliError> {
             let c = shorts[i];
             let rest: String = shorts[i + 1..].iter().collect();
             let attached = (!rest.is_empty()).then_some(rest);
-            let takes_value = matches!(c, 'w' | 'W' | 'r' | 'd' | 'b' | 'p');
+            let takes_value = matches!(c, 'w' | 'W' | 'r' | 'd' | 'b' | 'p' | 'z');
             match c {
                 'h' => return Err(CliError::Help),
                 'i' => o.interactive = true,
+                's' => o.separate = true,
+                'z' => o.zygote = Some(value(attached, &mut it, "z")?),
                 'a' => o.app_box = true,
                 '6' => o.ipv6 = true,
                 'x' => o.x11 = true,
@@ -313,6 +328,19 @@ mod tests {
         assert_eq!(o.out_if.as_deref(), Some("enp39s0"));
         assert!(o.x11 && o.root);
         assert_eq!(o.cmd, ["app", "--flag", "-x"]); // the app's flags are its own
+        assert!(!o.separate && o.zygote.is_none());
+        assert!(parse_ok(&["-s", "app"]).separate);
+        assert!(parse_ok(&["--separate", "app"]).separate);
+        assert_eq!(parse_ok(&["-zff", "app"]).zygote.as_deref(), Some("ff"));
+        assert_eq!(parse_ok(&["-z", "ff", "app"]).zygote.as_deref(), Some("ff"));
+        let o = parse_ok(&["-isz", "ff", "app"]);
+        assert!(o.interactive && o.separate && o.zygote.as_deref() == Some("ff"));
+        let o = parse_ok(&["--zygote=ff", "app"]);
+        assert_eq!(o.zygote.as_deref(), Some("ff"));
+        assert_eq!(
+            parse_ok(&["--zygote", "ff", "app"]).zygote.as_deref(),
+            Some("ff")
+        );
     }
 
     #[test]
@@ -362,7 +390,7 @@ mod tests {
             matches!(parse_err(&["--bogus", "app"]), CliError::Usage { message } if message.contains("--bogus"))
         );
         assert!(
-            matches!(parse_err(&["-z", "app"]), CliError::Usage { message } if message.contains("'z'"))
+            matches!(parse_err(&["-q", "app"]), CliError::Usage { message } if message.contains("'q'"))
         );
         assert!(
             matches!(parse_err(&["-b"]), CliError::Usage { message } if message.contains("requires an argument"))

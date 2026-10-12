@@ -4,6 +4,7 @@
 
 mod boxdir;
 mod cli;
+mod join;
 mod net;
 mod uevent;
 mod unroot;
@@ -287,6 +288,7 @@ fn main() {
     // the mountpoint lands in the box home on disk: note what bwrap will have
     // to create there, to remove it afterwards
     let mut app_bind_args: Vec<OsString> = Vec::new();
+    let mut app_bound = false;
     {
         let mut shown: Vec<PathBuf> = bind_destinations(&layer.args);
         shown.extend(bind_destinations(&snap_args));
@@ -297,6 +299,7 @@ fn main() {
             .iter()
             .any(|d| app.starts_with(d) || real.starts_with(d))
         {
+            app_bound = true;
             app_bind_args.extend([
                 "--ro-bind".into(),
                 app.clone().into_os_string(),
@@ -433,6 +436,101 @@ fn main() {
     } else if host_preload.is_some() {
         push(&mut args, &["--unsetenv", "LD_PRELOAD"]);
     }
+
+    // a sandbox with the same box and the same shape already running gets
+    // the command instead of a second sandbox (join.rs); -s opts out. What
+    // shapes it: the options that decide what the app sees inside, not what
+    // only concerns the command itself (chdir, the session, the environment).
+    // What the app itself adds (/snap, its own bind) is matched by need.
+    // -z ID names the sandbox instead: the name is all that has to match
+    let provides = join::Provides {
+        snap,
+        app: app_bound.then(|| app.clone()),
+    };
+    let needs = if opts.zygote.is_some() {
+        join::Provides::default()
+    } else {
+        join::Provides {
+            snap: provides.snap,
+            app: provides.app.clone(),
+        }
+    };
+    let mut registry = (!opts.separate || opts.zygote.is_some()).then(|| {
+        if let Some(name) = &opts.zygote {
+            return join::Registry::open(&runtime, &join::key(&[format!("name={name}")]));
+        }
+        let mut parts = vec![
+            format!("box={}", bx.path().display()),
+            format!("root={}", opts.root),
+            format!("net={}", opts.net),
+            format!("out_if={}", opts.out_if.as_deref().unwrap_or("")),
+            format!("ipv6={}", opts.ipv6),
+            format!("x11={}", opts.x11),
+            format!("camera={}", opts.camera),
+            format!("usb={}", opts.usb),
+        ];
+        // one part per field: a path may contain anything but NUL, which
+        // is what separates parts, so joining fields with a ':' could make
+        // two different bind sets read the same
+        let mut binds: Vec<(bool, &Path, &Path)> = opts
+            .binds
+            .iter()
+            .map(|b| {
+                (
+                    b.ro,
+                    b.real.as_path(),
+                    b.symlink_from.as_deref().unwrap_or(Path::new("")),
+                )
+            })
+            .collect();
+        binds.sort();
+        for (ro, real, from) in binds {
+            parts.push(format!("bind.ro={ro}"));
+            parts.push(format!("bind.real={}", real.display()));
+            parts.push(format!("bind.from={}", from.display()));
+        }
+        join::Registry::open(&runtime, &join::key(&parts))
+    });
+    if let Some(target) = registry
+        .as_ref()
+        .and_then(|r| r.find(!app_wrap.is_empty(), &needs))
+    {
+        drop(registry); // the lock: others may look while we run
+                        // what of the bwrap command line concerns the command itself
+        let mut env: Vec<join::EnvEdit> = Vec::new();
+        let mut caps: Vec<String> = Vec::new();
+        let mut it = args.iter();
+        while let Some(a) = it.next() {
+            if a == "--setenv" {
+                if let (Some(k), Some(v)) = (it.next(), it.next()) {
+                    env.push(join::EnvEdit::Set(k.clone(), v.clone()));
+                }
+            } else if a == "--unsetenv" {
+                if let Some(k) = it.next() {
+                    env.push(join::EnvEdit::Unset(k.clone()));
+                }
+            } else if a == "--cap-add" {
+                if let Some(c) = it.next() {
+                    caps.push(c.to_string_lossy().into_owned());
+                }
+            }
+        }
+        let code = join::run(
+            &target,
+            &app,
+            &app_args,
+            &env,
+            opts.chdir.as_deref().or(opts.workdir.as_deref()),
+            !opts.interactive,
+            &caps,
+        );
+        drop(cleanup);
+        std::process::exit(code);
+    }
+    if let Some(r) = registry.as_mut() {
+        r.register(&provides);
+    }
+    drop(registry);
 
     let code = match pipes {
         None => {

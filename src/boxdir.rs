@@ -29,6 +29,13 @@ pub struct BoxDir {
     pub home: PathBuf,
 }
 
+impl BoxDir {
+    /// The box directory itself.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 /// -b: a bare NAME is a box under ~/sandboxes, anything with a slash is a
 /// directory; -a: per-app box named after the binary's path with dashes for
 /// slashes (/usr/bin/foo -> usr-bin-foo); default: the shared box

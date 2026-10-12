@@ -573,6 +573,172 @@ fn reset_is_refused_while_the_box_is_mounted() {
     assert!(!b.join("usr").exists());
 }
 
+/// A sandbox held open on `script` (which must print "ready" once it is
+/// up), with its stdout consumed up to that line.
+fn hold(s: &Scratch, opts: &[&str], script: &str) -> Child {
+    let mut c = s
+        .sandbox()
+        .args(opts)
+        .arg("-b")
+        .arg(s.box_dir())
+        .args(["sh", "-c", script])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(c.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert_eq!(line.trim(), "ready");
+    c
+}
+
+#[test]
+fn a_run_like_a_running_sandbox_joins_it() {
+    require!(bwrap_works(), "bwrap can't create a sandbox here");
+    let s = Scratch::new("join");
+    let mut a = hold(&s, &[], "touch /tmp/from-a; echo ready; exec sleep 30");
+    // same box, same options: inside that sandbox — its /tmp, processes and
+    // hostname; as the real uid, with bwrap's environment edits, without
+    // capabilities, in the -d directory
+    let o = s
+        .sandbox()
+        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nowhere")
+        .args(["-d", "/usr", "-b"])
+        .arg(s.box_dir())
+        .args([
+            "sh",
+            "-c",
+            "pwd; test -e /tmp/from-a && echo shared || echo own; cat /proc/sys/kernel/hostname; \
+             id -u; echo ${DBUS_SESSION_BUS_ADDRESS:-unset} $WAYLAND_DISPLAY; \
+             cat /proc/[0-9]*/comm | grep -c '^sleep$'; grep '^CapEff' /proc/self/status; \
+             grep '^NoNewPrivs' /proc/self/status",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        lines(&o),
+        [
+            "/usr",
+            "shared",
+            "sandbox",
+            &uid(),
+            "unset wayland-0",
+            "1",
+            "CapEff:\t0000000000000000",
+            "NoNewPrivs:\t1"
+        ]
+    );
+    // the command's exit status comes back
+    assert_eq!(s.sh(&[], "exit 7").status.code(), Some(7));
+    // -s, or options that shape the sandbox differently: one of its own
+    assert_eq!(
+        lines(&s.sh(&["-s"], "test -e /tmp/from-a && echo shared || echo own")),
+        ["own"]
+    );
+    fs::create_dir(s.dir.join("ro")).unwrap();
+    assert_eq!(
+        lines(&s.sh(
+            &["-r", &s.path("ro")],
+            "test -e /tmp/from-a && echo shared || echo own"
+        )),
+        ["own"]
+    );
+    // an app the sandbox doesn't have (one outside every bind, bound in
+    // by itself) gets a sandbox of its own, and the running one stays
+    // joinable next to it; a shell joins the app's sandbox too
+    fs::create_dir(s.dir.join("app")).unwrap();
+    let exe = s.dir.join("app/run");
+    fs::write(
+        &exe,
+        "#!/bin/sh\ntest -e /tmp/from-a && echo shared || echo own; \
+         [ \"$1\" = hold ] && { touch /tmp/from-run; echo ready; exec sleep 30; }; true\n",
+    )
+    .unwrap();
+    fs::set_permissions(&exe, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let run_exe = |hold: bool| {
+        let mut c = s.sandbox();
+        c.arg("-b").arg(s.box_dir()).arg(&exe);
+        if hold {
+            c.arg("hold");
+        }
+        c
+    };
+    assert_eq!(lines(&run_exe(false).output().unwrap()), ["own"]);
+    assert_eq!(
+        lines(&s.sh(&[], "test -e /tmp/from-a && echo shared || echo own")),
+        ["shared"]
+    );
+    let mut r = run_exe(true).stdout(Stdio::piped()).spawn().unwrap();
+    let mut line = String::new();
+    let mut out = BufReader::new(r.stdout.take().unwrap());
+    out.read_line(&mut line).unwrap(); // "own"
+    line.clear();
+    out.read_line(&mut line).unwrap();
+    assert_eq!(line.trim(), "ready");
+    // two sandboxes fit it now; either way a shell lands in one of them
+    assert_eq!(
+        lines(&s.sh(
+            &[],
+            "test -e /tmp/from-run && echo in-run || { test -e /tmp/from-a && echo in-a; }"
+        ))
+        .len(),
+        1
+    );
+    // SAFETY: our own child's pid
+    unsafe { libc::kill(r.id() as i32, libc::SIGTERM) };
+    wait_for(&mut r, Duration::from_secs(10));
+    assert_eq!(
+        lines(&s.sh(&[], "test -e /tmp/from-a && echo shared || echo own")),
+        ["shared"]
+    );
+    // -z ID: the name alone decides, whatever the options
+    let mut n = hold(
+        &s,
+        &["-z", "one"],
+        "touch /tmp/from-one; echo ready; exec sleep 30",
+    );
+    let see = "test -e /tmp/from-one && echo one || { test -e /tmp/from-a && echo a || echo own; }";
+    assert_eq!(lines(&s.sh(&["-zone", "-r", &s.path("ro")], see)), ["one"]);
+    assert_eq!(lines(&s.sh(&["--zygote=two"], see)), ["own"]);
+    assert_eq!(lines(&s.sh(&["-s"], see)), ["own"]);
+    assert_eq!(lines(&s.sh(&[], see)), ["a"]);
+    // SAFETY: our own child's pid
+    unsafe { libc::kill(n.id() as i32, libc::SIGTERM) };
+    wait_for(&mut n, Duration::from_secs(10));
+    // a joined command ends with the sandbox
+    let mut j = hold(&s, &[], "echo ready; exec sleep 30");
+    // SAFETY: our own child's pid
+    unsafe { libc::kill(a.id() as i32, libc::SIGTERM) };
+    assert!(!wait_for(&mut a, Duration::from_secs(10)).success());
+    assert!(!wait_for(&mut j, Duration::from_secs(10)).success());
+    // with the sandbox gone its record is stale: a new run starts one
+    assert_eq!(
+        lines(&s.sh(&[], "test -e /tmp/from-a && echo shared || echo own")),
+        ["own"]
+    );
+}
+
+#[test]
+fn joining_under_net_lands_in_the_app_s_nested_namespace() {
+    require!(bwrap_works(), "bwrap can't create a sandbox here");
+    require!(
+        net_works(),
+        "pasta/nsenter/unshare or a default route is missing"
+    );
+    let s = Scratch::new("join-net");
+    let mut a = hold(&s, &["-n"], "echo ready; exec sleep 30");
+    let o = s.sh(
+        &["-n"],
+        "id -u; tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d ' ' | grep -vc '^lo$'; \
+         cat /proc/[0-9]*/comm | grep -c '^sleep$'",
+    );
+    assert_eq!(lines(&o), [uid().as_str(), "1", "1"]);
+    // SAFETY: our own child's pid
+    unsafe { libc::kill(a.id() as i32, libc::SIGTERM) };
+    wait_for(&mut a, Duration::from_secs(10));
+}
+
 #[test]
 fn net_gives_an_interface_and_keeps_the_real_uid() {
     require!(bwrap_works(), "bwrap can't create a sandbox here");

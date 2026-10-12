@@ -180,7 +180,12 @@ extern "C" fn forward_signal(sig: libc::c_int) {
 /// --new-session, so a terminal's Ctrl-C only reaches us), and let the
 /// normal exit path clean up.
 pub fn forward_signals_to(child: &Child) {
-    CHILD.store(child.id() as i32, Ordering::SeqCst);
+    forward_signals_to_pid(child.id() as i32);
+}
+
+/// The same for a child known by pid (a forked one).
+pub fn forward_signals_to_pid(pid: i32) {
+    CHILD.store(pid, Ordering::SeqCst);
     for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
         // SAFETY: installing an async-signal-safe handler
         unsafe {
